@@ -1,6 +1,6 @@
-## 模块二：`bsa_bootstrap.jl`
+# 模块二：`bsa_bootstrap.jl`
 
-### Bootstrap FSS 分析流程
+## Bootstrap FSS 分析流程
 
 理解 Bootstrap 流程是掌握这些数据结构的关键。完整的 Bootstrap FSS 分析包含以下步骤：
 
@@ -27,7 +27,7 @@
 
 ---
 
-### 输出数据流总结
+## 输出数据流总结
 
 ```
 bootstrap_bsa_analysis()
@@ -49,9 +49,9 @@ physical_params: {"Uc", "nu", "eta_psi", ...}  ← 物理量（带 bootstrap 误
 
 ---
 
-### 核心数据结构
+## 核心数据结构
 
-#### `BSAProblem`：定义一个 FSS 问题
+### `BSAProblem`：定义一个 FSS 问题
 
 打包所有与**问题本身**相关的信息（数据、列名）。
 
@@ -84,7 +84,7 @@ end
 
 ---
 
-#### `BootstrapConfig`：配置 Bootstrap 采样
+### `BootstrapConfig`：配置 Bootstrap 采样
 
 控制 bootstrap 的**采样行为**和**参数随机化**策略。
 
@@ -116,7 +116,7 @@ jitter_params = Dict(
 
 ---
 
-#### `BootstrapResult`：存储 Bootstrap 结果
+### `BootstrapResult`：存储 Bootstrap 结果
 
 ```julia
 struct BootstrapResult
@@ -133,9 +133,9 @@ end
 - 70-90%：可接受
 - < 70%：初值或数据质量问题
 
-### 使用示例
+## 使用示例
 
-#### 场景 1：U-dependent FSS（关联比 vs U）
+### 场景 1：U-dependent FSS（关联比 vs U）
 
 - **`AFMCorrelationRatio-FSS-analysis.jl`**：U-dependent bootstrap FSS
   - X = U（无误差）
@@ -163,7 +163,7 @@ problem = BSAProblem(
 )
 ```
 
-#### 场景 2：R-dependent FSS（m² vs R）
+### 场景 2：R-dependent FSS（m² vs R）
 
 - **`AFMm2-CorrelationRatio-FSS-analysis.jl`**：R-dependent bootstrap FSS
   - X = R_AF（有误差！）
@@ -197,7 +197,7 @@ problem = BSAProblem(
 
 ---
 
-### 临时文件管理
+## 临时文件管理
 
 Bootstrap 为每次迭代生成临时文件：
 - `bootstrap_N.dat`：FSS 输入文件

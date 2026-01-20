@@ -1,5 +1,7 @@
 # BSAHelper
 
+[![文档](https://img.shields.io/badge/docs-latest-blue.svg)](https://wangfh5.github.io/BSAHelper/)
+
 A small Julia helper package for interfacing with the external Bayesian Scaling Analysis (BSA) executable.
 
 ## Requirements
