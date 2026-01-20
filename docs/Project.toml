@@ -1,0 +1,4 @@
+[deps]
+BSAHelper = "3161ad99-d2a6-4a97-b504-14f97e99ab06"
+DataProcessforDQMC = "46f08351-ef40-491d-b5bb-ec4458782aec"
+Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
