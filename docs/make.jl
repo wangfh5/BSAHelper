@@ -22,7 +22,6 @@ makedocs(;
     authors="ssqc and contributors",
     sitename="BSAHelper.jl",
     format=Documenter.HTML(;
-        canonical="https://ssqc.github.io/BSAHelper.jl",
         edit_link="main",
         assets=String[],
     ),
@@ -34,10 +33,7 @@ makedocs(;
     checkdocs=:none,
 )
 
-deploydocs(;
-    repo="github.com/ssqc/BSAHelper.jl",
-    devbranch="main",
-)
+# NOTE: 等仓库创建后再启用 deploydocs，并补充 repo/canonical 设置。
 
 # Optional: Start local preview server
 # Usage: DOCS_PREVIEW=true julia docs/make.jl
