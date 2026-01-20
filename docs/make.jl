@@ -6,7 +6,6 @@ Pkg.activate(@__DIR__)
 try
     # Ensure docs environment uses the local, unregistered package
     Pkg.develop(path=joinpath(@__DIR__, ".."))
-    Pkg.develop(url="https://github.com/wangfh5/DataProcessforDQMC.jl.git")
     Pkg.instantiate()
 catch e
     @warn "Docs environment setup (Pkg.develop/instantiate) failed" e
