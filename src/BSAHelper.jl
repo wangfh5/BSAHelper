@@ -16,4 +16,7 @@ export bootstrap_bsa_analysis, save_bootstrap_summary, success_rate
 export prepare_bootstrap_plot_data, extract_and_format_physical_params
 export resolve_bsa_binary
 
+# Optional plotting module (implemented via package extensions to avoid hard deps on PyPlot)
+include("bsa_plotting.jl")
+
 end

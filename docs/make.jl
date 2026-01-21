@@ -29,6 +29,8 @@ makedocs(;
         "概览" => "index.md",
         "模块一：bsa_core.jl" => "bsa_core.md",
         "模块二：bsa_bootstrap.jl" => "bsa_bootstrap.md",
+        "模块三：bsa_plotting.jl" => "bsa_plotting.md",
+        "API Reference" => "api.md",
     ],
     checkdocs=:none,
 )
