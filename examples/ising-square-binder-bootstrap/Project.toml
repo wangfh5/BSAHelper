@@ -1,0 +1,9 @@
+[deps]
+BSAHelper = "3161ad99-d2a6-4a97-b504-14f97e99ab06"
+DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
+JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
+LaTeXStrings = "b964fa9f-0449-5b57-a5c2-d3ea65f4040f"
+PyPlot = "d330b81b-6aea-500a-939a-2ce795aea3ee"
+
+[sources]
+BSAHelper = {path = "../.."}

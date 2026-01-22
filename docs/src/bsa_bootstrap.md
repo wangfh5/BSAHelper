@@ -93,6 +93,7 @@ Base.@kwdef struct BootstrapConfig
     n_samples::Int = 1000                          # Bootstrap 迭代次数（生产: 1000, 测试: 100）
     seed::Union{Int,Nothing} = nothing             # 随机种子（42 = 可重复）
     jitter_params::Dict{Symbol,Float64} = Dict()   # 多参数 jitter（见下文详解）
+    y_sample_relative_error::Float64 = 0.0         # 每个 bootstrap 样本的 y 相对误差（0 = 视为精确观测）
     verbose::Bool = false                          # 每 100 次迭代打印进度
     keep_failed::Bool = false                      # 是否保留失败的拟合（调试用）
     tempdir::Union{Nothing,String} = nothing       # 临时文件目录（nothing = 自动清理）

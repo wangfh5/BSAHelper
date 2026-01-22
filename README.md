@@ -10,3 +10,7 @@ A small Julia helper package for interfacing with the external Bayesian Scaling 
 - Point `BSAHelper` to the executable via `ENV["BSA_BIN"]` or `BSAConfig(binary=...)`.
 - For now, this package depends on [wangfh5/DataProcessforDQMC.jl](https://github.com/wangfh5/DataProcessforDQMC.jl.git) for specific statistics/formatting utilities.
   - `DataProcessforDQMC.jl` is unregistered; you may need to add it to your project environment via `Pkg.add(url="https://github.com/wangfh5/DataProcessforDQMC.jl.git")` if needed.
+
+## Examples
+
+- `examples/ising-square-binder-bootstrap/`: Minimal end-to-end example (read data → bootstrap → plot) using the Ising Binder-ratio sample data from repository [KenjiHarada/BSA.git](https://github.com/KenjiHarada/BSA.git).

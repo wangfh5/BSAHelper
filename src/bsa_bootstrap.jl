@@ -54,6 +54,7 @@ Control bootstrap sampling behaviour and parameter randomisation.
 - `n_samples`: Number of bootstrap iterations
 - `seed`: Random seed for reproducibility
 - `jitter_params`: Dict mapping parameter names to jitter radii (e.g., Dict(:Tc_init => 0.1, :c2_init => 0.05))
+- `y_sample_relative_error`: Relative error applied to each bootstrap y sample when writing the BSA input file (e.g. 0.05 → 5%)
 - `verbose`: Print progress every 100 iterations
 - `keep_failed`: Keep failed fits in statistics (default: false)
 - `tempdir`: Directory for temporary files (auto-created if nothing)
@@ -62,6 +63,7 @@ Base.@kwdef struct BootstrapConfig
     n_samples::Int = 1000
     seed::Union{Int,Nothing} = nothing
     jitter_params::Dict{Symbol,Float64} = Dict{Symbol,Float64}()
+    y_sample_relative_error::Float64 = 0.0
     verbose::Bool = false
     keep_failed::Bool = false
     tempdir::Union{Nothing,String} = nothing
@@ -400,6 +402,12 @@ function bootstrap_bsa_analysis(problem::BSAProblem,
                                 cfg::BootstrapConfig,
                                 bsa_cfg::BSACore.BSAConfig,
                                 base_params)
+    # Check the relative error for each bootstrap sample
+    rel_err = Float64(cfg.y_sample_relative_error)
+    if !isfinite(rel_err) || rel_err < 0
+        throw(ArgumentError("BootstrapConfig.y_sample_relative_error must be a finite, non-negative value"))
+    end
+
     data = filter_problem_data(problem)
     if isempty(data)
         @error "No data points available after filtering"
@@ -454,9 +462,9 @@ function bootstrap_bsa_analysis(problem::BSAProblem,
             temp_log = joinpath(tmp_dir, "bootstrap_$(n)_t$(tid).log")
 
             try
-                # Bootstrap realization should have zero error (each sample is treated as exact observation)
-                zero_err = zeros(length(y_sample))
-                write_bootstrap_dataset(problem, L_vals, x_sample, y_sample, zero_err, temp_fss)
+                # By default, each sample is an exact observation; optionally add relative error.
+                y_sample_err = abs.(y_sample) .* rel_err
+                write_bootstrap_dataset(problem, L_vals, x_sample, y_sample, y_sample_err, temp_fss)
                 success = BSACore.run_bsa_analysis(bsa_cfg, params, temp_fss, temp_op, temp_log; silent=true)
                 if success && isfile(temp_op)
                     metadata, _ = BSACore.parse_bsa_output(temp_op)

@@ -32,6 +32,9 @@ Assumes format "Xc" → "X" (e.g., "Uc" → "U", "Tc" → "T", "Jc" → "J").
 - Base variable name (removes trailing 'c')
 """
 function extract_base_variable(critical_param_name::String)
+    if critical_param_name == "betac"
+        return "\\beta"
+    end
     if endswith(critical_param_name, "c")
         return critical_param_name[1:end-1]
     else
@@ -51,6 +54,9 @@ Assumes format "Xc" → "X_c" (e.g., "Uc" → "U_c", "Tc" → "T_c").
 function format_critical_param_latex(critical_param_name::String)
     if endswith(critical_param_name, "c") && length(critical_param_name) > 1
         base = critical_param_name[1:end-1]
+        if base == "beta"
+            base = "\\beta"
+        end
         return "$(base)_c"
     else
         return critical_param_name

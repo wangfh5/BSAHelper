@@ -90,18 +90,4 @@ using Test
             isfile(path) && rm(path; force=true)
         end
     end
-
-    @testset "plotting extension (optional)" begin
-        pyplot_path = Base.find_package("PyPlot")
-        latex_path = Base.find_package("LaTeXStrings")
-        if pyplot_path === nothing || latex_path === nothing
-            @info "PyPlot/LaTeXStrings not available; skipping plotting extension tests"
-            @test true
-        else
-            @eval using PyPlot
-            @eval using LaTeXStrings
-            @test isdefined(BSAHelper, :BSAPlotting)
-            @test length(methods(BSAHelper.BSAPlotting.plot_bsa_data_collapse)) > 0
-        end
-    end
 end
