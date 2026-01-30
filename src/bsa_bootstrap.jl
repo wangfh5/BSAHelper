@@ -7,7 +7,7 @@ using Printf
 using Logging
 using Base.Threads
 using ProgressMeter
-using DataProcessforDQMC: round_error, format_value_error, iqr_fence_filter
+using DataProcessforDQMC: round_error, format_value_error, iqr_fence_filter, compute_cr_m2_covariance
 
 # Import BSACore from parent scope (must be included before this module)
 import ..BSACore
@@ -18,7 +18,8 @@ import ..BSACore: extract_physical_params
 export BSAProblem, BootstrapConfig, BootstrapResult,
        bootstrap_bsa_analysis, save_bootstrap_summary,
        success_rate, prepare_bootstrap_plot_data,
-       format_physical_params, extract_and_format_physical_params
+       format_physical_params, extract_and_format_physical_params,
+       chi2red_m2R
 # Note: extract_physical_params is imported and extended, not re-exported here
 
 ## -------------------------------------------------------------------------- ##
@@ -792,13 +793,112 @@ function prepare_bootstrap_plot_data(
                                                       eta_type=eta_type)
         
         return (metadata, data_sections, phys_fmt)
-        
+
     finally
         # Cleanup if temp_dir was auto-created
         if cleanup_needed
             isdir(working_dir) && rm(working_dir; recursive=true, force=true)
         end
     end
+end
+
+## -------------------------------------------------------------------------- ##
+##                      Specialized chi2red for m²-R fitting                  ##
+## -------------------------------------------------------------------------- ##
+
+"""
+    chi2red_m2R(metadata::Dict{String,Any}, data_sections::Vector{<:AbstractMatrix})
+
+计算 m²-R 联合拟合的约化卡方值，自动考虑 R 和 m² 之间的协方差。
+
+# 适用场景
+
+本函数专门用于以下 FSS 拟合场景：
+- X轴：相关比 R = 1 - C(δk)/C(0)
+- Y轴：缩放结构因子 m² = L^{(1+η_φ)} × C(0)
+- BSA 参数：c1 = 0（X 不做变换）
+
+由于 R 和 m² 都依赖于 C(0)，它们之间存在统计协方差。
+
+# 协方差公式
+
+```
+σ_{R,m²} = m²_scaled · (1 - R) · (σ_{m²}/m²)²
+```
+
+其中：
+- `m²_scaled` = L^{-(1+η_φ)} × C(0)，即 Y 轴的值
+- `R` = 1 - C(δk)/C(0)，即 X 轴的值
+- `σ_{m²}/m²` = 相对误差（由于线性缩放，scaled 和 unscaled 的相对误差相同）
+
+# 有效方差
+
+```
+σ_eff² = σ_{m²}² + (df/dR)² σ_R² - 2(df/dR) σ_{R,m²}
+```
+
+# 要求
+
+- `data_sections[1]` 必须包含 xerr 列（R 的误差）
+- BSA 拟合时应设置 c1 = 0
+
+# 参数
+
+- `metadata`: BSA 输出的元数据
+- `data_sections`: BSA 输出的数据段
+
+# 返回值
+
+- `Float64`: 带协方差校正的约化卡方值
+
+# 示例
+
+```julia
+metadata, data_sections = parse_bsa_output("m2R_fit.op")
+chi2red = chi2red_m2R(metadata, data_sections)
+```
+"""
+function chi2red_m2R(metadata::Dict{String,Any},
+                     data_sections::Vector{<:AbstractMatrix})
+
+    # ===== Step 1: Validate data_sections structure =====
+    length(data_sections) >= 2 || throw(ArgumentError(
+        "data_sections must contain at least 2 sections: scaled_data and scaling_func"))
+
+    scaled_data = data_sections[1]
+
+    # ===== Step 2: Determine form and validate xerr presence =====
+    form = get(metadata, "form", 0)
+    base_cols = form == 1 ? 8 : 7
+    n_cols = size(scaled_data, 2)
+
+    if n_cols != base_cols + 1
+        throw(ArgumentError(
+            "chi2red_m2R requires xerr column in data_sections. " *
+            "Expected $(base_cols + 1) columns for form=$form, got $n_cols. " *
+            "Ensure BSAProblem has x_err_col defined."))
+    end
+
+    # ===== Step 3: Extract columns =====
+    # For m²-R fitting with c1=0, scaled X equals original x
+    # Column layout: [X, Y, E, ...] is the same for both form=0 and form=1
+    X = Float64.(scaled_data[:, 1])  # correlation ratio
+    Y = Float64.(scaled_data[:, 2])  # scaled m²
+    E = Float64.(scaled_data[:, 3])  # scaled error
+
+    n_points = size(scaled_data, 1)
+
+    # ===== Step 4: Compute covariance for each data point =====
+    sigma_xy = Vector{Float64}(undef, n_points)
+
+    for i in 1:n_points
+        # σ_xy = Y · (1-x) · (E/Y)²
+        result = compute_cr_m2_covariance(Y[i], E[i], X[i])
+        sigma_xy[i] = result.covariance
+    end
+
+    # ===== Step 5: Delegate to chi2red_interp =====
+    return BSACore.chi2red_interp(metadata, data_sections; sigma_xy=sigma_xy)
 end
 
 end

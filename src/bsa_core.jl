@@ -1,10 +1,12 @@
 module BSACore
 
+using Interpolations
 using Printf
 
 export BSAConfig, BSAParameters, run_bsa_analysis, resolve_bsa_binary
 export ensure_parameters, update_parameters, get_param_to_pidx_mapping
 export parse_bsa_output, extract_parameter_dict, extract_physical_params, print_summary
+export chi2_interp, chi2red_interp
 
 ## -------------------------------------------------------------------------- ##
 ##                    Basic Structs defining a BSA calling                    ##
@@ -338,6 +340,144 @@ function parse_bsa_output(filename::String)
         push!(data_sections, hcat(current_section...)')
     end
     return metadata, data_sections
+end
+
+"""
+    chi2_interp(metadata, data_sections; sigma_xy=nothing) -> Float64
+
+Recompute an approximate χ² by interpolating the scaling function and evaluating
+
+    χ² = Σᵢ ((Yᵢ - F(Xᵢ)) / Eᵢ)²
+
+This is a *naive* goodness-of-fit measure, meant to be consistent with the
+residuals plot logic (linear interpolation with linear extrapolation).
+
+# Inputs
+- `data_sections[1]`: scaled data table (at least 3 columns: X, Y, E).
+  If an extra column `xerr` is present (in the same convention as `BSAPlotting.plot_bsa_data_collapse`),
+  this function will propagate X errors into an effective variance:
+  `σ_eff^2 = σ_y^2 + (df/dx)^2 σ_x^2`.
+- `data_sections[2]`: scaling function table (at least 2 columns: X_func, mu_func; sigma is ignored)
+
+# Keywords
+- `sigma_xy`: optional covariance between X and Y for each point (same coordinates as scaled_data),
+  used only when `xerr` is present.
+  When provided, the effective variance becomes:
+  `σ_eff^2 = σ_y^2 + (df/dx)^2 σ_x^2 - 2 (df/dx) σ_xy`.
+  - If `sigma_xy` is a Real, the covariance is assumed to be constant for all points.
+"""
+function chi2_interp(metadata::Dict{String,Any},
+                     data_sections::Vector{<:AbstractMatrix};
+                     sigma_xy::Union{AbstractVector,Real,Nothing}=nothing)
+    length(data_sections) >= 2 || throw(ArgumentError("data_sections must contain at least 2 sections: scaled_data and scaling_func"))
+
+    scaled_data = data_sections[1]
+    scaling_func = data_sections[2]
+    size(scaled_data, 2) >= 3 || throw(ArgumentError("scaled_data must have at least 3 columns: X, Y, E"))
+    size(scaling_func, 2) >= 2 || throw(ArgumentError("scaling_func must have at least 2 columns: X_func, mu_func"))
+
+    # Select the scaled scatter data columns
+    X = Float64.(scaled_data[:, 1])
+    Y = Float64.(scaled_data[:, 2])
+    E = Float64.(scaled_data[:, 3]) # Y error
+    all(isfinite, X) || throw(ArgumentError("scaled_data contains non-finite X values"))
+    all(isfinite, Y) || throw(ArgumentError("scaled_data contains non-finite Y values"))
+    all(e -> isfinite(e) && e > 0, E) || throw(ArgumentError("scaled_data contains non-finite or non-positive E values (cannot compute χ²)"))
+
+    # Select the scaling function columns
+    X_func = Float64.(scaling_func[:, 1]) # grid points of the scaling function
+    mu_func = Float64.(scaling_func[:, 2]) # regression function value
+    all(isfinite, X_func) || throw(ArgumentError("scaling_func contains non-finite X_func values"))
+    all(isfinite, mu_func) || throw(ArgumentError("scaling_func contains non-finite mu_func values"))
+
+    # Sort the scaling function data for later interpolation
+    sort_idx = sortperm(X_func)
+    X_sorted = X_func[sort_idx]
+    mu_sorted = mu_func[sort_idx]
+
+    # Filter out duplicate X points -- for interpolation and numerical derivatives
+    X_unique = Float64[]
+    mu_unique = Float64[]
+    for i in eachindex(X_sorted)
+        if isempty(X_unique) || X_sorted[i] != X_unique[end]
+            push!(X_unique, X_sorted[i])
+            push!(mu_unique, mu_sorted[i])
+        end
+    end
+    length(X_unique) >= 2 || throw(ArgumentError("scaling_func must have at least 2 distinct X points for interpolation"))
+
+    # Interpolate the scaling function at the data points
+    itp = LinearInterpolation(X_unique, mu_unique, extrapolation_bc=Line())
+    mu_at_data = itp.(X) # regression function value at the data points
+
+    # Select the xerr column
+    form = get(metadata, "form", 0)
+    base_cols = form == 1 ? 8 : 7
+    xerr = nothing
+    if size(scaled_data, 2) == base_cols + 1
+        xerr = Float64.(scaled_data[:, end])
+        all(x -> isfinite(x) && x >= 0, xerr) || throw(ArgumentError("scaled_data contains non-finite or negative xerr values"))
+    end
+
+    xerr === nothing && sigma_xy !== nothing && throw(ArgumentError("sigma_xy is provided but xerr column is not present in scaled_data"))
+
+    # case 1: no xerr column
+    if xerr === nothing
+        return sum(((Y .- mu_at_data) ./ E) .^ 2)
+    end
+
+    # Prepare the covariance vector
+    sigma_xy_vec = if sigma_xy !== nothing
+        vec = sigma_xy isa Real ? fill(Float64(sigma_xy), length(X)) : Float64.(sigma_xy)
+        length(vec) == length(X) || throw(ArgumentError("sigma_xy length mismatch: expected $(length(X)), got $(length(vec))"))
+        all(isfinite, vec) || throw(ArgumentError("sigma_xy contains non-finite values"))
+        vec
+    else
+        nothing
+    end
+
+    # slopes[i] is the slope of the interval [X_unique[i], X_unique[i+1]]
+    slopes = (mu_unique[2:end] .- mu_unique[1:end-1]) ./ (X_unique[2:end] .- X_unique[1:end-1])
+
+    function dfdx_at(x::Float64)
+        x <= X_unique[1] && return slopes[1]
+        x >= X_unique[end] && return slopes[end]
+
+        j = searchsortedlast(X_unique, x)
+        j >= length(X_unique) && return slopes[end]
+
+        X_unique[j] == x && 1 < j < length(X_unique) && return 0.5 * (slopes[j-1] + slopes[j])
+        return slopes[j]
+    end
+
+    dfdx = map(dfdx_at, X)
+    # case 2: xerr column is present
+    sigma2_eff = E .^ 2 .+ (dfdx .^ 2) .* (xerr .^ 2)
+    # case 3: sigma_xy column is present
+    sigma_xy_vec !== nothing && (sigma2_eff .-= 2 .* dfdx .* sigma_xy_vec)
+    all(s2 -> isfinite(s2) && s2 > 0, sigma2_eff) || throw(ArgumentError("Encountered non-finite or non-positive σ_eff^2 while computing χ²"))
+
+    return sum((Y .- mu_at_data) .^ 2 ./ sigma2_eff)
+end
+
+"""
+    chi2red_interp(metadata, data_sections; sigma_xy=nothing) -> Float64
+
+Compute the reduced χ² using `chi2_interp`:
+
+    χ²_red = χ² / (n_points - n_freeparams)
+
+If `metadata["n_points"]` is missing, falls back to `size(data_sections[1], 1)`.
+If `metadata["n_freeparams"]` is missing, defaults to 0.
+"""
+function chi2red_interp(metadata::Dict{String,Any},
+                        data_sections::Vector{<:AbstractMatrix};
+                        sigma_xy::Union{AbstractVector,Real,Nothing}=nothing)
+    n_points = get(metadata, "n_points", size(data_sections[1], 1))
+    n_freeparams = get(metadata, "n_freeparams", 0)
+    dof = n_points - n_freeparams
+    dof > 0 || throw(ArgumentError("Invalid degrees of freedom: n_points=$n_points, n_freeparams=$n_freeparams"))
+    return chi2_interp(metadata, data_sections; sigma_xy=sigma_xy) / dof
 end
 
 """

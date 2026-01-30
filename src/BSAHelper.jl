@@ -4,17 +4,20 @@ include("bsa_core.jl")
 include("bsa_bootstrap.jl")
 
 using .BSACore: BSAConfig, BSAParameters, run_bsa_analysis, parse_bsa_output,
-    extract_parameter_dict, extract_physical_params, print_summary, resolve_bsa_binary
+    extract_parameter_dict, extract_physical_params, print_summary, resolve_bsa_binary,
+    chi2_interp, chi2red_interp
 
 using .BSABootstrap: BSAProblem, BootstrapConfig, BootstrapResult,
     bootstrap_bsa_analysis, save_bootstrap_summary, success_rate,
-    prepare_bootstrap_plot_data, extract_and_format_physical_params
+    prepare_bootstrap_plot_data, extract_and_format_physical_params,
+    chi2red_m2R
 
 export BSAConfig, BSAParameters, BSAProblem, BootstrapConfig, BootstrapResult
 export run_bsa_analysis, parse_bsa_output, extract_parameter_dict, extract_physical_params, print_summary
 export bootstrap_bsa_analysis, save_bootstrap_summary, success_rate
 export prepare_bootstrap_plot_data, extract_and_format_physical_params
 export resolve_bsa_binary
+export chi2_interp, chi2red_interp, chi2red_m2R
 
 # Optional plotting module (implemented via package extensions to avoid hard deps on PyPlot)
 include("bsa_plotting.jl")

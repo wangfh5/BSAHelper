@@ -167,6 +167,8 @@ else
     # print chi2_red
     chi2red = plot_metadata["chi2"] / (plot_metadata["n_points"] - plot_metadata["n_freeparams"])
     println("chi2_red = $chi2red")
+    chi2red_interp_val = chi2red_interp(plot_metadata, plot_data_sections)
+    println("chi2_red (interp, naive) = $chi2red_interp_val")
 
     @save result_path bootstrap_result plot_metadata plot_data_sections phys_fmt
     println("✓ Saved bootstrap result: $result_path")
