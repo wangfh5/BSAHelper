@@ -417,21 +417,23 @@ end
 """
     add_chi2_text!(ax, metadata::Dict)
 
-Add chi-squared reduced text box to axis from metadata.
-
-Automatically extracts n_freeparams from metadata for correct χ²_reduced calculation.
+Render the χ²_reduced text box. Prefers `metadata["chi2_eff"]` (σ_X-aware χ² that
+`prepare_bootstrap_plot_data` injects at bootstrap time, picking either `chi2_interp`
+or `chi2red_m2R` based on `eta_type`); falls back to `metadata["chi2"]` (BSA raw,
+y-error only) when the corrected value is absent — e.g. when loading pre-1.1 JLD2
+files that predate the chi2_eff injection.
 """
 function add_chi2_text!(ax, metadata::Dict)
-    if haskey(metadata, "chi2") && haskey(metadata, "n_points") && haskey(metadata, "n_freeparams")
-        chi2 = metadata["chi2"]
-        n_points = metadata["n_points"]
-        n_freeparams = metadata["n_freeparams"]
-        chi2_red = chi2 / max(1, n_points - n_freeparams)
-        ax.text(0.02, 0.95, @sprintf("\$\\chi^2_{\\mathrm{red}} = %.2f\$", chi2_red),
-                transform=ax.transAxes, fontsize=14,
-                verticalalignment="top",
-                bbox=Dict("boxstyle"=>"round", "facecolor"=>"wheat", "alpha"=>0.8))
-    end
+    haskey(metadata, "n_points") && haskey(metadata, "n_freeparams") || return
+    chi2 = get(metadata, "chi2_eff", get(metadata, "chi2", nothing))
+    chi2 === nothing && return
+
+    dof = max(1, metadata["n_points"] - metadata["n_freeparams"])
+    chi2_red = chi2 / dof
+    ax.text(0.02, 0.95, @sprintf("\$\\chi^2_{\\mathrm{red}} = %.2f\$", chi2_red),
+            transform=ax.transAxes, fontsize=14,
+            verticalalignment="top",
+            bbox=Dict("boxstyle"=>"round", "facecolor"=>"wheat", "alpha"=>0.8))
 end
 
 ## -------------------------------------------------------------------------- ##

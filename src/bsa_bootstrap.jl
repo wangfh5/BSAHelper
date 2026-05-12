@@ -651,13 +651,21 @@ This function:
 - `bsa_cfg`: BSAConfig for BSA settings (including xscale for plotting range)
 - `temp_dir`: Temporary directory (auto-created if nothing)
 - `critical_param_name`: Physical name for critical point (default: "Uc")
-- `eta_type`: Interpretation of c2 (:none, :eta_psi, :eta_phi)
+- `eta_type`: Interpretation of c2 (:none, :eta_psi, :eta_phi). Also drives χ² routing in
+  Step 6b: `:eta_phi` triggers the C(0)-covariance refinement (`chi2red_m2R`) because
+  m²-R fits have R and Y sharing the same normalization; everything else uses plain
+  `chi2_interp` with σ_X propagation. **Invariant**: callers that pass `eta_type=:eta_phi`
+  must build a `BSAProblem` where x_col is a correlation ratio and y_col is the
+  corresponding C(0)-shared structure factor — otherwise the σ_xy term is meaningless.
 
 # Returns
 Tuple of `(metadata, data_sections, phys_fmt)` where:
-- `metadata::Dict`: Contains **Bootstrap errors** for parameters (Tc, c1, c2, ...)
+- `metadata::Dict`: Contains **Bootstrap errors** for parameters (Tc, c1, c2, ...) and
+  the σ_X-aware χ² in `metadata["chi2_eff"]` (used by `add_chi2_text!` for plot titles).
+  `metadata["chi2"]` keeps the BSA y-only raw value for backward compatibility with
+  pipelines that already record it.
 - `data_sections::Vector{Matrix{Float64}}`:
-  - `[1]`: Scaled data points
+  - `[1]`: Scaled data points (with an appended xerr column when `x_err_col` is set)
   - `[2]`: Scaling function [X, mu, sigma]
 - `phys_fmt::Dict{String,NamedTuple}`: Formatted physical quantities with value_str/error_str
 
@@ -786,7 +794,30 @@ function prepare_bootstrap_plot_data(
             # Append X errors as the last column of scaled_data
             data_sections[1] = hcat(scaled_data, x_errors)
         end
-        
+
+        # Step 6b: Inject σ_X-aware χ² into metadata so plot titles and CSV pipelines
+        # read a single, on-disk, "fit-correct" number instead of BSA's y-only raw χ².
+        #   * eta_type == :eta_phi  → m²-R fit: R and Y share C(0), use chi2red_m2R
+        #     so the σ_xy = Y · (1-X) · (σ_Y/Y)² covariance term is folded into σ²_eff.
+        #   * otherwise             → just σ_X propagation via chi2_interp (xerr column).
+        # The original BSA raw value remains under metadata["chi2"]; chi2_eff is additive.
+        # Gate on xerr column presence so we don't overwrite chi2_eff with a value
+        # numerically equal to raw chi2 when σ_X propagation has nothing to do.
+        if !isempty(data_sections) &&
+           size(data_sections[1], 2) == (scaling_form == 1 ? 8 : 7) + 1 &&
+           haskey(metadata, "n_points") && haskey(metadata, "n_freeparams")
+            try
+                dof = max(1, metadata["n_points"] - metadata["n_freeparams"])
+                metadata["chi2_eff"] = if eta_type == :eta_phi
+                    chi2red_m2R(metadata, data_sections) * dof
+                else
+                    BSACore.chi2_interp(metadata, data_sections)
+                end
+            catch err
+                @warn "Step 6b: chi2_eff injection failed; collapse title will fall back to BSA raw chi2" err
+            end
+        end
+
         # Step 7: Generate formatted physical quantities with proper significant digits
         phys_fmt = extract_and_format_physical_params(result;
                                                       critical_param_name=critical_param_name,
