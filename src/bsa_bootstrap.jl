@@ -803,8 +803,14 @@ function prepare_bootstrap_plot_data(
         # The original BSA raw value remains under metadata["chi2"]; chi2_eff is additive.
         # Gate on xerr column presence so we don't overwrite chi2_eff with a value
         # numerically equal to raw chi2 when σ_X propagation has nothing to do.
+        # Form 1 is excluded: chi2_interp/chi2red_m2R evaluate the model against the
+        # leading scaling function only (data_sections[2]); for scaling_form=1 the
+        # L^{-c3} correction term is not part of that section, so the residual keeps
+        # the full correction and χ² blows up. Consumers should fall back to
+        # metadata["chi2"] (BSA's raw χ²) for form-1 fits.
         if !isempty(data_sections) &&
-           size(data_sections[1], 2) == (scaling_form == 1 ? 8 : 7) + 1 &&
+           scaling_form == 0 &&
+           size(data_sections[1], 2) == 7 + 1 &&
            haskey(metadata, "n_points") && haskey(metadata, "n_freeparams")
             try
                 dof = max(1, metadata["n_points"] - metadata["n_freeparams"])

@@ -371,6 +371,12 @@ function chi2_interp(metadata::Dict{String,Any},
                      sigma_xy::Union{AbstractVector,Real,Nothing}=nothing)
     length(data_sections) >= 2 || throw(ArgumentError("data_sections must contain at least 2 sections: scaled_data and scaling_func"))
 
+    get(metadata, "form", 0) == 1 && throw(ArgumentError(
+        "chi2_interp is invalid for scaling_form=1: it evaluates the model against the " *
+        "leading scaling function (data_sections[2]) only, ignoring the L^{-c3} " *
+        "correction term, which grossly inflates χ². Use metadata[\"chi2\"] " *
+        "(BSA's raw χ²) for form-1 fits."))
+
     scaled_data = data_sections[1]
     scaling_func = data_sections[2]
     size(scaled_data, 2) >= 3 || throw(ArgumentError("scaled_data must have at least 3 columns: X, Y, E"))
