@@ -140,7 +140,7 @@ function latexstring_smart(s::AbstractString)
 end
 
 """
-    get_ylabel_text(observable_label, eta_type; c2_value=nothing)
+    get_ylabel_text(observable_label, eta_type; c2_value=nothing, correction_x_expr=nothing)
 
 Return Y-axis label based on eta_type and optional c2 value.
 
@@ -148,10 +148,15 @@ When `eta_type == :none`:
 - If `c2_value == 0.0` (or not provided): no L scaling, returns `A`
 - If `c2_value ≠ 0.0`: shows L scaling, returns `A / L^{c_2}`
 
+When `correction_x_expr` is given (form-1 correction-subtracted view), the
+subtracted correction term is written explicitly: `A - L^{-\\omega} F_1[x]`
+when there is no L scaling, `(A - L^{-\\omega} F_1[x]) / L^{c_2}` otherwise.
+
 Note: `observable_label` can be a plain String or LaTeXString. 
 """
 function get_ylabel_text(observable_label::AbstractString, eta_type::Symbol; 
-                        c2_value::Union{Float64, Nothing}=nothing)
+                        c2_value::Union{Float64, Nothing}=nothing,
+                        correction_x_expr::Union{AbstractString, Nothing}=nothing)
     observable_label_latex = latexstring_smart(observable_label)
 
     # construct L suffix based on eta_type
@@ -164,6 +169,17 @@ function get_ylabel_text(observable_label::AbstractString, eta_type::Symbol;
         l_suffix = L" / L^{-\eta_\psi}"
     else
         l_suffix = L" / L^{c_2}"
+    end
+
+    if correction_x_expr !== nothing
+        # strip $...$ delimiters (e.g. from a LaTeXString xlabel_custom) before embedding
+        x_expr = replace(correction_x_expr, "\$" => "")
+        subtraction = latexstring(" - L^{-\\omega} F_1[$(x_expr)]")
+        if isempty(string(l_suffix))
+            return observable_label_latex * subtraction
+        else
+            return L"(" * observable_label_latex * subtraction * L")" * l_suffix
+        end
     end
 
     return observable_label_latex * l_suffix
@@ -251,14 +267,23 @@ end
     plot_residuals!(ax, X, Y, E, L, L_values, X_func, mu_func;
                    mycolor=nothing, mymarker=nothing, xerr=nothing)
 
-Plot residuals: (Y - F(X)) / E, where F is interpolated from scaling function.
+Plot residuals: (Y - F(X)) / E. `F` at the data points comes from `mu_at_data`
+when given (native per-point predictions from the `point_predictions` section);
+otherwise the scaling-function grid is linearly interpolated.
 """
 function plot_residuals!(ax, X::AbstractVector, Y::AbstractVector, E::AbstractVector, 
-                        L::AbstractVector, L_values::AbstractVector,
-                        X_func::AbstractVector, mu_func::AbstractVector;
-                        mycolor=nothing, mymarker=nothing, xerr::Union{AbstractVector,Nothing}=nothing)
-    # Create interpolation function
-    itp = LinearInterpolation(X_func, mu_func, extrapolation_bc=Line())
+                         L::AbstractVector, L_values::AbstractVector,
+                         X_func::AbstractVector, mu_func::AbstractVector;
+                         mycolor=nothing, mymarker=nothing,
+                         xerr::Union{AbstractVector,Nothing}=nothing,
+                         mu_at_data::Union{AbstractVector,Nothing}=nothing)
+    if mu_at_data === nothing
+        itp = LinearInterpolation(X_func, mu_func, extrapolation_bc=Line())
+        mu_at_data = itp.(X)
+    else
+        length(mu_at_data) == length(X) || throw(ArgumentError(
+            "mu_at_data must have the same length as X"))
+    end
 
     for (idx, L_val) in enumerate(L_values)
         mask = L .== L_val
@@ -271,8 +296,7 @@ function plot_residuals!(ax, X::AbstractVector, Y::AbstractVector, E::AbstractVe
         E_data = E[mask]
         
         # Compute residuals
-        Y_func_interp = itp.(X_data)
-        residuals = (Y_data .- Y_func_interp) ./ E_data
+        residuals = (Y_data .- mu_at_data[mask]) ./ E_data
         
         color = mycolor !== nothing ? mycolor(idx) : "C$(idx-1)"
         marker = mymarker !== nothing ? mymarker(idx) : "o"
@@ -418,19 +442,22 @@ end
     add_chi2_text!(ax, metadata::Dict)
 
 Render the χ²_reduced text box. Prefers `metadata["chi2_eff"]` (σ_X-aware χ² that
-`prepare_bootstrap_plot_data` injects at bootstrap time, picking either `chi2_interp`
-or `chi2red_m2R` based on `eta_type`); falls back to `metadata["chi2"]` (BSA raw,
-y-error only) when the corrected value is absent — e.g. when loading pre-1.1 JLD2
-files that predate the chi2_eff injection.
+`prepare_bootstrap_plot_data` injects at bootstrap time via `chi2_interp`, with the
+m²-R C(0)-covariance folded in when `eta_type=:eta_phi`); falls back to
+`metadata["chi2"]` (BSA raw, y-error only) when the corrected value is absent —
+e.g. when loading older JLD2 files that predate the chi2_eff injection.
 """
 function add_chi2_text!(ax, metadata::Dict)
     haskey(metadata, "n_points") && haskey(metadata, "n_freeparams") || return
     chi2 = get(metadata, "chi2_eff", get(metadata, "chi2", nothing))
     chi2 === nothing && return
 
-    dof = max(1, metadata["n_points"] - metadata["n_freeparams"])
+    has_fit_dof = haskey(metadata, "fit_n_freeparams") || metadata["n_freeparams"] > 0
+    n_freeparams = get(metadata, "fit_n_freeparams", metadata["n_freeparams"])
+    dof = max(1, metadata["n_points"] - n_freeparams)
     chi2_red = chi2 / dof
-    ax.text(0.02, 0.95, @sprintf("\$\\chi^2_{\\mathrm{red}} = %.2f\$", chi2_red),
+    label = has_fit_dof ? "\\chi^2_{\\mathrm{red}}" : "\\chi^2/N"
+    ax.text(0.02, 0.95, @sprintf("\$%s = %.2f\$", label, chi2_red),
             transform=ax.transAxes, fontsize=14,
             verticalalignment="top",
             bbox=Dict("boxstyle"=>"round", "facecolor"=>"wheat", "alpha"=>0.8))
@@ -439,6 +466,17 @@ end
 ## -------------------------------------------------------------------------- ##
 ##                            Main Plotting Functions                         ##
 ## -------------------------------------------------------------------------- ##
+
+# Verify that a `point_predictions` table is row-aligned with the scaled data.
+function _check_prediction_alignment(predictions, X, Y)
+    length(predictions.X1) == length(X) || throw(ArgumentError(
+        "point_predictions row count does not match scaled data"))
+    all(isapprox.(predictions.X1, X; rtol=1e-12, atol=1e-14)) || throw(ArgumentError(
+        "point_predictions X1 values do not match scaled data"))
+    all(isapprox.(predictions.Y, Y; rtol=1e-12, atol=1e-14)) || throw(ArgumentError(
+        "point_predictions Y values do not match scaled data"))
+    return nothing
+end
 
 """
     plot_bsa_data_collapse(metadata, data_sections, phys_fmt, figs_dir; 
@@ -463,6 +501,10 @@ Render BSA data collapse plot with residuals using formatted physical quantities
   Set to true if using single BSA fit with MC errors. For Bootstrap analyses,
   keep false since σ doesn't reflect parameter uncertainty.
 - Other styling parameters: `tick_params`, `font_legend`, `mycolor`, `mymarker`
+- `correction_view`: `:raw` plots the uncorrected finite-size data points;
+  `:subtracted` subtracts the scaling correction, plotting `Y-correction`
+  against the zero-slice scaling function, and writes the subtracted
+  correction term into the y-axis label (e.g. `R - L^{-\\omega} F_1[x]`).
 """
 function plot_bsa_data_collapse(metadata::Dict, data_sections::Vector, phys_fmt::Dict,
                                 figs_dir::String;
@@ -473,10 +515,11 @@ function plot_bsa_data_collapse(metadata::Dict, data_sections::Vector, phys_fmt:
                                 mycolor=nothing,
                                 mymarker=nothing,
                                 critical_param_name::String="Uc",
-                                eta_type::Symbol=:none,
-                                observable_label::AbstractString="A",
-                                xlabel_custom::Union{AbstractString,Nothing}=nothing,
-                                show_confidence::Bool=false)
+                                 eta_type::Symbol=:none,
+                                 observable_label::AbstractString="A",
+                                 xlabel_custom::Union{AbstractString,Nothing}=nothing,
+                                 show_confidence::Bool=false,
+                                 correction_view::Symbol=:raw)
 
     ## ------------------- Extract data from `data_sections` ------------------- ##
     
@@ -488,6 +531,11 @@ function plot_bsa_data_collapse(metadata::Dict, data_sections::Vector, phys_fmt:
     scaled_data = data_sections[1]
     scaling_func = data_sections[2]
     has_correction = get(metadata, "form", 0) == 1
+
+    correction_view in (:raw, :subtracted) || throw(ArgumentError(
+        "correction_view must be :raw or :subtracted"))
+    correction_view == :subtracted && !has_correction && throw(ArgumentError(
+        "correction_view=:subtracted is defined only for scaling_form=1"))
 
     ## ------------------------- Plot scatters and lines ------------------------ ##
     
@@ -533,9 +581,38 @@ function plot_bsa_data_collapse(metadata::Dict, data_sections::Vector, phys_fmt:
     
     L_values = sort(unique(L))
     X_func, mu_func, sigma_func = eachcol(scaling_func)
-    
+
+    if correction_view == :subtracted
+        predictions = BSACore.get_point_predictions(metadata, data_sections)
+        _check_prediction_alignment(predictions, X, Y)
+        Y = predictions.Y .- predictions.correction
+        E = predictions.E
+    end
+
     if plot_mode == :full
         # Full mode: data + scaling function + residuals
+        # Residual panel: model values at the data points on the same zero-slice
+        # curve the main panel draws (form=0: mu; form=1: mu_zero). Native
+        # per-point predictions are used when present; otherwise the scaling
+        # grid is interpolated inside plot_residuals!.
+        mu_at_data = nothing
+        residual_error = E
+        if correction_view == :subtracted
+            mu_at_data = predictions.mu_zero
+            if xerr !== nothing
+                sigma_xy = get(metadata, "sigma_xy", nothing)
+                sigma_xy !== nothing && length(sigma_xy) != length(X) && throw(ArgumentError(
+                    "metadata[\"sigma_xy\"] must have the same length as scaled data"))
+                residual_error = sqrt.(BSACore._effective_variance(
+                    E, predictions.dmu_full_dX1, xerr, sigma_xy))
+            end
+        elseif BSACore.has_point_predictions(metadata)
+            raw_predictions = BSACore.get_point_predictions(metadata, data_sections)
+            _check_prediction_alignment(raw_predictions, X, Y)
+            mu_at_data = hasproperty(raw_predictions, :mu_zero) ?
+                raw_predictions.mu_zero : raw_predictions.mu
+        end
+
         fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(8, 9),
                                        gridspec_kw=Dict("height_ratios" => [3, 1],
                                                        "hspace" => 0.1))
@@ -547,8 +624,9 @@ function plot_bsa_data_collapse(metadata::Dict, data_sections::Vector, phys_fmt:
         plot_scaling_function!(ax1, X_func, mu_func, sigma_func; show_confidence=show_confidence)
         
         # Plot residuals
-        plot_residuals!(ax2, X, Y, E, L, L_values, X_func, mu_func; 
-                       mycolor=mycolor, mymarker=mymarker, xerr=xerr)
+        plot_residuals!(ax2, X, Y, residual_error, L, L_values, X_func, mu_func;
+                        mycolor=mycolor, mymarker=mymarker, xerr=xerr,
+                        mu_at_data=mu_at_data)
     
     else  # plot_mode == :simple
         # Simple mode: only data points with window indicator
@@ -568,8 +646,20 @@ function plot_bsa_data_collapse(metadata::Dict, data_sections::Vector, phys_fmt:
     # Get c2 value for ylabel determination (from phys_fmt if available)
     c2_value = haskey(phys_fmt, "c2") ? phys_fmt["c2"].value : nothing
     
-    # Set labels
-    ax1.set_ylabel(get_ylabel_text(observable_label, eta_type; c2_value=c2_value), fontsize=19)
+    # Y-axis label; in the subtracted view the correction term is written into
+    # the label, e.g. R - L^{-ω} F₁[x] or (m² - L^{-ω} F₁[x]) / L^{-(1+η_φ)}
+    correction_x_expr = nothing
+    if correction_view == :subtracted
+        correction_x_expr = if xlabel_custom !== nothing
+            string(latexstring_smart(xlabel_custom))
+        else
+            base_var = extract_base_variable(critical_param_name)
+            param_latex = format_critical_param_latex(critical_param_name)
+            "($base_var - $param_latex) L^{1/\\nu}"
+        end
+    end
+    ax1.set_ylabel(get_ylabel_text(observable_label, eta_type; c2_value=c2_value,
+                                   correction_x_expr=correction_x_expr), fontsize=19)
     
     if plot_mode == :full
         # Full mode: set all labels, title, and chi2
@@ -586,8 +676,9 @@ function plot_bsa_data_collapse(metadata::Dict, data_sections::Vector, phys_fmt:
         end
         
         # Set title from formatted physical quantities
-        ax1.set_title(build_title_from_phys(phys_fmt; critical_param_name=critical_param_name, 
-                                            eta_type=eta_type), fontsize=19)
+        title = build_title_from_phys(phys_fmt; critical_param_name=critical_param_name,
+                                      eta_type=eta_type)
+        ax1.set_title(title, fontsize=19)
         
         # Add chi2 info
         add_chi2_text!(ax2, metadata)

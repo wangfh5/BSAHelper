@@ -2,7 +2,7 @@
 
 ## 设计目标
 
-封装外部 BSA（Bayesian Scaling Analysis）命令行工具，提供结构化的 Julia 接口。
+封装外部 [BSA](https://github.com/wangfh5/BSA)（Bayesian Scaling Analysis）命令行工具，提供结构化的 Julia 接口。
 
 BSA 命令行格式：
 ```bash
@@ -17,7 +17,7 @@ BSA 命令行格式：
 
 ## 核心数据结构
 
-### `BSAConfig`：BSA 命令行选项
+### [`BSAConfig`：BSA 命令行选项](@id bsa_config)
 
 ```julia
 Base.@kwdef struct BSAConfig
@@ -39,7 +39,7 @@ end
 
 ---
 
-### `BSAParameters`：BSA 拟合参数序列
+### [`BSAParameters`：BSA 拟合参数序列](@id bsa_parameters)
 
 BSA 命令行参数格式：`mask initial_value`
 - `mask`：`0` = 固定，`1` = 自由
@@ -152,9 +152,11 @@ BSA 输入文件必须遵循以下结构：
 
 ## 核心设计：Data Flow（数据处理流）
 
-`bsa_core.jl` 的核心是实现 BSA 工具的**完整数据流封装**，包括输入（stdin）和输出（stdout）的双向桥接。
+`bsa_core.jl` 的核心是实现 BSA 工具的**完整数据流封装**，包括输入（stdin）和输出（stdout）的双向桥接。`*.op` 输出由两部分组成：
+- `metadata` 承载拟合参数，在本模块内经过多层转换；
+- `data_sections` 承载数值数据点，是一组原样保存的矩阵，本模块不对它做转换。
 
-### 数据流全景
+### [`metadata`：物理参数的数据流全景](@id parameter_pipeline)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -196,9 +198,9 @@ BSA 输入文件必须遵循以下结构：
 - `scaling_form=1`: p[2]=c3, p[3]=c2 (位置互换)
 - `scaling_form` 自动从 `metadata["form"]` 提取，无需手动传递
 
-### 数据层级的使用场景
+#### 数据层级的使用场景
 
-不同场景下使用不同层级的数据：
+参数链上不同场景使用不同层级：
 
 | 使用场景 | 使用的数据层级 | 原因 |
 |---------|--------------|------|
@@ -211,12 +213,29 @@ BSA 输入文件必须遵循以下结构：
 - 📦 `params` 是内部中间层，确保参数命名无歧义
 - 📊 `phys` 是外部展示层，物理含义清晰，适合给用户看
 
+### [`data_sections`：数据点区段](@id data_sections)
+
+`parse_bsa_output` 的第二个返回值 `data_sections::Vector{Matrix{Float64}}` 是 `*.op` 输出的另一半：一组数值矩阵，本模块原样持有、不做任何转换（下游的 bootstrap 重建与绘图模块才会加工、消费它们）。每个 dataset 依次写出以下区段（空行分隔）：
+
+| 区段 | 内容 | 列（form-0 / form-1） |
+|------|------|----------------------|
+| 1 | 标度后数据点（绘图坐标） | `[X, Y, E, L, x, y, dy]` / `[X1, Y, E, X2, L, x, y, dy]` |
+| 2 | 推断的标度函数曲线（100 点网格） | `[X_func, mu, sigma]` |
+| 3 | 同区段 1，内部归一化坐标 | 同区段 1 |
+| 4 | 同区段 2，内部归一化坐标 | 同区段 2 |
+| 5 | 逐点模型预测（命名区段 `point_predictions`） | form-0 为 11 列（`row X1 Y E mu std_latent dmu_dX1 L T A dA`，末四列为原始输入值）；form-1 为 20 列，以输出中的 `# Columns :` 头为准 |
+
+- `x, y, dy` 为原始输入值；form-1 的 `X2 = L^{-c3}` 是修正变量。
+- 区段 5 要求后端来自 [github.com/wangfh5/BSA](https://github.com/wangfh5/BSA) 项目（`new_bfss-rs` 对两种 form 都总是输出，带 `# Dataset :` / `# Section :` / `# Columns :` 头）；上游原版 C++ BSA 不输出该区段。读取时用 `get_point_predictions(metadata, data_sections)` 按名获取，不要依赖固定的第五区段位置。`has_point_predictions(metadata)` 可用来探测该区段是否存在。
+
+下游如何加工与使用这些区段：bootstrap 在[重建绘图数据](@ref reconstruct_plot_data)时给区段 1 追加 xerr 列并注入 σ_X-aware `chi2_eff`；绘图模块用区段 1、2 画数据塌缩图，form-1 还可切换到 [correction-subtracted 视图](@ref form1_views)。
+
 ### 模块职责分离
 
 | 模块 | 核心职责 | 关键函数 |
 |------|---------|---------|
 | **`bsa_core.jl`** | 单次 BSA 调用 + 参数解释 | `parse → extract_parameter_dict → extract_physical_params` |
-| **`bsa_bootstrap.jl`** | Bootstrap 统计 + 批量复用 | 调用 `BSACore.extract_physical_params()` 处理 bootstrap 样本，并使用 `DataProcessforDQMC.statistics` 生成 `phys_fmt`（预格式化物理量） |
+| **[`bsa_bootstrap.jl`](bsa_bootstrap.md)** | Bootstrap 统计 + 批量复用 | 调用 `BSACore.extract_physical_params()` 处理 bootstrap 样本，并使用 `DataProcessforDQMC.statistics` 生成 `phys_fmt`（预格式化物理量） |
 
 ✅ 物理转换逻辑只在 `bsa_core.jl` 实现一次，`bsa_bootstrap.jl` 通过组合复用  
 ✅ 所有下游模块（绘图、分析）共享同一套参数映射和物理转换
@@ -225,11 +244,8 @@ BSA 输入文件必须遵循以下结构：
 
 ```julia
 # 完整数据流（单次 BSA 结果）
-metadata, _ = parse_bsa_output("result.op")
+metadata, data_sections = parse_bsa_output("result.op")  # data_sections → 绘图/χ²（见上节）
 params = extract_parameter_dict(metadata)
 phys = extract_physical_params(params, critical_param_name="Uc", eta_type=:eta_psi)
 print_summary(metadata, critical_param_name="Uc", eta_type=:eta_psi)  # 一步到位
 ```
-
----
-

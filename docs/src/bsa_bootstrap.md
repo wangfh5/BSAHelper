@@ -2,7 +2,7 @@
 
 ## Bootstrap FSS 分析流程
 
-理解 Bootstrap 流程是掌握这些数据结构的关键。完整的 Bootstrap FSS 分析包含以下步骤：
+理解 Bootstrap 流程是掌握下文三个核心数据结构——[`BSAProblem`](@ref bsa_problem)、[`BootstrapConfig`](@ref bootstrap_config)、[`BootstrapResult`](@ref bootstrap_result)——的关键。完整的 Bootstrap FSS 分析包含以下步骤：
 
 ```
 1. 定义问题 (BSAProblem)
@@ -43,15 +43,22 @@ physical_params: {"Uc", "nu", "eta_psi", ...}  ← 物理量（带 bootstrap 误
 ```
 
 **关键设计**：
-- ✅ Bootstrap 全流程使用无歧义参数（params 层级）
+- ✅ Bootstrap 全流程使用无歧义参数（[params 层级](@ref parameter_pipeline)）
 - ✅ 提供配套的 `extract_physical_params()` 进行物理诠释
 - ✅ `save_bootstrap_summary()` 集成所有上下文，输出完整总结
+
+### [重建绘图数据（`prepare_bootstrap_plot_data`）](@id reconstruct_plot_data)
+
+Bootstrap 完成后，用均值参数将全部参数固定、以 `use_mc=false` 重跑一次 BSA 来重建 `data_sections`，并把 metadata 中的参数覆盖为 bootstrap 均值 ± 标准差，供绘图直接使用。此阶段对标度后数据区段做两处 BSA 本身不提供的补充：
+
+- 若 `BSAProblem` 设了 `x_err_col`，逐点匹配原始数据后给区段 1 追加一列 xerr（原始 X 误差乘以 `L^c1` 变换到标度坐标）：form-0 由 7 列变 8 列，form-1 由 8 列变 9 列。绘图模块据此绘制[双向误差棒](@ref plotting_data_flow)。
+- 有 xerr 列时注入 σ_X-aware 的 `metadata["chi2_eff"]`（m²-R 拟合经 `m2R_covariance` 把 `Cov(X,Y)` 折入有效方差）；BSA 原始的 y-only χ² 仍保留在 `metadata["chi2"]`。χ² 重算使用 `point_predictions` 区段的逐点原生预测与解析导数；输出缺该区段时，form-0 回退到标度函数网格的插值加数值导数，form-1 回退使用原始 χ²。
 
 ---
 
 ## 核心数据结构
 
-### `BSAProblem`：定义一个 FSS 问题
+### [`BSAProblem`：定义一个 FSS 问题](@id bsa_problem)
 
 打包所有与**问题本身**相关的信息（数据、列名）。
 
@@ -75,7 +82,7 @@ end
 
 - **Y 标度处理**：
   - ❌ **不要**预先标度 Y（`Y' = Y * L^c2`），这会混淆参数物理意义
-  - ✅ **正确做法**：通过 `BSAParameters` 的 `c2_init` 和 `c2_fixed` 控制标度
+  - ✅ **正确做法**：通过 [`BSAParameters`](@ref bsa_parameters) 的 `c2_init` 和 `c2_fixed` 控制标度
   - BSA 会自动处理 `Y = L^c2 * F(X, L^{-c3})` 的标度关系
 
 - **R-dependent FSS 的简化方法**：
@@ -84,7 +91,7 @@ end
 
 ---
 
-### `BootstrapConfig`：配置 Bootstrap 采样
+### [`BootstrapConfig`：配置 Bootstrap 采样](@id bootstrap_config)
 
 控制 bootstrap 的**采样行为**和**参数随机化**策略。
 
@@ -117,7 +124,7 @@ jitter_params = Dict(
 
 ---
 
-### `BootstrapResult`：存储 Bootstrap 结果
+### [`BootstrapResult`：存储 Bootstrap 结果](@id bootstrap_result)
 
 ```julia
 struct BootstrapResult
@@ -206,4 +213,3 @@ Bootstrap 为每次迭代生成临时文件：
 - `bootstrap_N.log`：BSA 日志文件
 
 这些文件在每次迭代后自动清理。调试时可以通过设置 `BootstrapConfig.tempdir` 保留文件。
-

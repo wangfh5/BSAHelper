@@ -35,11 +35,11 @@ import BSAHelper: BSACore, BSABootstrap, BSAPlotting
 
 ## 数据流和控制流
 
-### 数据流转换
+### [数据流转换](@id plotting_data_flow)
 
 **输入数据来源**： 以下两个输入数据来源, 也对应后面的两个使用场景. 
-- `BSAHelper.BSACore.parse_bsa_output()`：解析 BSA 输出文件（仅包含 Y 误差）
-- `BSAHelper.BSABootstrap.prepare_bootstrap_plot_data()`：准备 Bootstrap 绘图数据（注入 X 误差）
+- [`BSAHelper.BSACore.parse_bsa_output()`](@ref parameter_pipeline)：解析 BSA 输出文件（仅包含 Y 误差）
+- [`BSAHelper.BSABootstrap.prepare_bootstrap_plot_data()`](@ref reconstruct_plot_data)：准备 Bootstrap 绘图数据（注入 X 误差）
 
 **核心数据流**：
 ```
@@ -61,7 +61,7 @@ params → BSACore.extract_physical_params()
   
   ↓ 绘图使用
 phys → 标题和坐标轴标签
-metadata (chi2, n_points, n_freeparams) → χ²_reduced 文本框
+metadata (chi2, n_points, n_freeparams) → χ² 文本框
 data_sections[1] 的 xerr 列 → 双向误差棒（主图和残差图）
 ```
 
@@ -79,9 +79,9 @@ data_sections[1] 的 xerr 列 → 双向误差棒（主图和残差图）
 4. 根据 `eta_type` 设置 Y 轴标签
 
 **残差图 (ax2)** *(仅 plot_mode=:full)*：
-1. 计算残差：`(Y - F(X)) / E`（F(X) 通过插值获得）
+1. 计算残差：`(Y - F(X)) / E`。F(X) 优先取 `point_predictions` 区段的逐点原生预测（对主图所画的零切面曲线求值：form-0 用 `mu`，form-1 用 `mu_zero`）；输出缺该区段时回退到标度函数网格的线性插值。
 2. 绘制残差点（支持 X 误差棒），添加参考线 (y=0, y=±2)
-3. 显示 χ²_reduced（自动从 `metadata` 提取 `n_freeparams`）
+3. 显示 χ² 文本框，标注按 metadata 自适应：能确定原拟合的自由参数数目（`fit_n_freeparams`，或 `n_freeparams > 0`）时显示 χ²_red；否则（例如未保存该数目的旧 JLD2 重建图）明确显示 χ²/N，不会把 reconstruction 的零自由参数误标为 reduced χ²。
 
 **拟合窗口指示器 (ax0)** *(仅 plot_mode=:simple)*：
 1. 在主图上方显示拟合窗口，替代传统 legend
@@ -109,7 +109,7 @@ BSAPlotting.plot_bsa_data_collapse(
 
 ### 使用方式二：Bootstrap 分析
 
-**关键步骤**：使用 `prepare_bootstrap_plot_data` 注入 Bootstrap 误差和 X 误差
+**关键步骤**：使用 [`prepare_bootstrap_plot_data`](@ref reconstruct_plot_data) 注入 Bootstrap 误差和 X 误差
 
 ```julia
 # 1. Bootstrap 分析
@@ -135,7 +135,7 @@ end
 
 **工作原理**：
 - `prepare_bootstrap_plot_data` 会将 Bootstrap 均值和标准差写入 `metadata`，并基于 `BootstrapResult` 生成 `phys_fmt`
-- `phys_fmt` 使用 `DataProcessforDQMC.statistics` 中的 `round_error` / `format_value_error`，根据 error-of-std 自洽确定有效数字，生成 `value_str` / `error_str`
+- `phys_fmt` 使用 `DataProcessforDQMC.statistics` 中的 `round_error` / `format_value_error`，根据 error-of-std 自洽确定有效数字，生成 `value_str` / `error_str`；当 bootstrap 成功样本太少导致 error-of-std 与误差本身同量级时，误差只按量级引用（如 `0.0069` 上进到 `0.01`），数值精度随之对齐并发出警告提醒增加成功样本数
 - 如果 `problem.x_err_col !== nothing`，从原始数据提取 X 误差并追加到 `data_sections[1]`，绘图函数自动检测 `xerr` 列并绘制双向误差棒
 - 绘图函数从 `data_sections` 读取数据散点（含 Bootstrap 误差）和平均拟合参数的标度函数，从 `metadata` 提取 χ² 信息，通过 `phys_fmt` 构建标题和 Y 轴缩放文字
 
@@ -266,6 +266,21 @@ BSAPlotting.plot_bsa_data_collapse(
 | `eta_type` | Symbol | `:none` | η 类型 (`:none`, `:eta_phi`, `:eta_psi`) |
 | `observable_label` | AbstractString | `"A"` | 可观测量标签（支持 String 或 LaTeXString） |
 | `xlabel_custom` | AbstractString? | `nothing` | 自定义 x 轴标签（支持 String 或 LaTeXString） |
+| `correction_view` | Symbol | `:raw` | form-1 的[两种视图](@ref form1_views)（`:raw` 或 `:subtracted`） |
+
+### [Form-1 的两种视图](@id form1_views)
+
+form-1 输出下，`correction_view` 在两种视图间切换：
+
+- `:raw`（默认）：直接绘制未修正的有限尺寸数据点；
+- `:subtracted`：扣除标度修正项，绘制 `Y-correction` 对 `X1`，标度曲线为 `mu_zero(X1)`，残差改用逐点完整模型 `Y-mu_full`；纵轴标签直接写出扣除后的表达式，其中 `F_1` 的自变量取 `xlabel_custom`（未提供时用 `(x-x_c)L^{1/\nu}`），如 CR 通道的 `R - L^{-\omega} F_1[(U-U_c)L^{1/\nu}]`、m²-R 通道（X1 即 R 本身）的 `(m^2 - L^{-\omega} F_1[R]) / L^{-(1+\eta_\phi)}`。该视图需要含 `point_predictions` 区段的输出（form-1 输出总是包含该区段）。
+
+```julia
+BSAPlotting.plot_bsa_data_collapse(
+    metadata, data_sections, phys_fmt, figs_dir;
+    correction_view=:subtracted,
+)
+```
 
 ### 样式参数
 

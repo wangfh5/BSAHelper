@@ -215,7 +215,9 @@ Dict{String, NamedTuple} where each entry contains:
 - `value`: Float64 mean value
 - `error`: Float64 std (error bar)
 - `err_of_err`: Float64 error of the error
-- `digits`: Int significant digits for error
+- `digits`: Int significant digits for error; 0 means the error is only quoted
+  to its order of magnitude (err_of_err comparable to err, typically too few
+  successful bootstrap samples) and a warning is emitted
 - `value_str`: String formatted value (e.g., "3.846")
 - `error_str`: String formatted error (e.g., "0.012")
 """
@@ -228,6 +230,14 @@ function format_physical_params(phys_num::Dict{String,Tuple{Float64,Float64}},
         if n_success > 1 && err > 0
             err_of_err = err / sqrt(2 * (n_success - 1))
             rounded_err, sigdigits = round_error(err, err_of_err)
+            if sigdigits < 1
+                @warn "Error bar of `$key` is only reliable to its order of magnitude " *
+                      "(err=$err, err_of_err=$err_of_err, n_success=$n_success); " *
+                      "quoting it as $rounded_err. Increase the number of successful " *
+                      "bootstrap samples for a precise error bar."
+            end
+            # sigdigits=0 时 round_error 已把误差上进到量级（如 0.0069 → 0.01），
+            # format_value_error 原生支持按量级引用并保持值与误差精度对齐
             val_str, err_str = format_value_error(val, rounded_err, sigdigits; format=fmt)
         else
             err_of_err = 0.0
@@ -652,11 +662,16 @@ This function:
 - `temp_dir`: Temporary directory (auto-created if nothing)
 - `critical_param_name`: Physical name for critical point (default: "Uc")
 - `eta_type`: Interpretation of c2 (:none, :eta_psi, :eta_phi). Also drives χ² routing in
-  Step 6b: `:eta_phi` triggers the C(0)-covariance refinement (`chi2red_m2R`) because
-  m²-R fits have R and Y sharing the same normalization; everything else uses plain
+  Step 6b: `:eta_phi` folds the m²-R C(0)-covariance (`m2R_covariance`) into σ²_eff
+  because R and Y share the same normalization; everything else uses plain
   `chi2_interp` with σ_X propagation. **Invariant**: callers that pass `eta_type=:eta_phi`
   must build a `BSAProblem` where x_col is a correlation ratio and y_col is the
   corresponding C(0)-shared structure factor — otherwise the σ_xy term is meaningless.
+- `base_params`: the `BSAParameters` (or NamedTuple) used for the original bootstrap
+  fit. When given, the number of free parameters of that fit is injected into
+  `metadata["fit_n_freeparams"]` so that `chi2red_interp` divides by the correct
+  degrees of freedom (the reconstruction run itself has all parameters fixed and
+  reports `n_freeparams = 0`). When omitted, reduced-χ² falls back to χ²/N.
 
 # Returns
 Tuple of `(metadata, data_sections, phys_fmt)` where:
@@ -681,7 +696,8 @@ function prepare_bootstrap_plot_data(
     bsa_cfg::BSACore.BSAConfig;
     temp_dir::Union{String,Nothing}=nothing,
     critical_param_name::String="Uc",
-    eta_type::Symbol=:none
+    eta_type::Symbol=:none,
+    base_params=nothing
 )
     # Prepare temporary directory
     cleanup_needed = (temp_dir === nothing)
@@ -736,10 +752,11 @@ function prepare_bootstrap_plot_data(
             binary = bsa_cfg.binary,
             scaling_form = bsa_cfg.scaling_form,
             use_mc = false,  # No MC for reconstruction
-            xscale = bsa_cfg.xscale  # Use xscale from bsa_cfg
+            xscale = bsa_cfg.xscale,  # Use xscale from bsa_cfg
         )
         
-        success = BSACore.run_bsa_analysis(recon_cfg, recon_params, temp_fss, temp_op, temp_log; silent=false)
+        success = BSACore.run_bsa_analysis(
+            recon_cfg, recon_params, temp_fss, temp_op, temp_log; silent=false)
         
         if !success || !isfile(temp_op)
             @warn "Failed to reconstruct scaling function"
@@ -748,6 +765,12 @@ function prepare_bootstrap_plot_data(
         
         # Step 5: Parse output and inject Bootstrap errors into metadata
         metadata, data_sections = BSACore.parse_bsa_output(temp_op)
+        if base_params !== nothing
+            # Degrees of freedom of the original fit (the reconstruction run
+            # itself has every parameter fixed and reports n_freeparams = 0).
+            metadata["fit_n_freeparams"] = BSACore.count_free_params(
+                bsa_cfg, BSACore.ensure_parameters(base_params))
+        end
         
         # Overwrite fitted parameters with Bootstrap mean ± std (key operation!)
         # This allows reusing plot_bsa_data_collapse with Bootstrap errors
@@ -775,19 +798,19 @@ function prepare_bootstrap_plot_data(
             
             # Match each scaled data point back to original data by L and transformed X
             for i in 1:n_points
-                X_scaled = scaled_data[i, 1]
                 # L column depends on scaling_form:
                 # - form=0: [X, Y, E, L, x, y, dy]
                 # - form=1: [X1, Y, E, X2=1/L^c3, L, x, y, dy]
                 L_val = scaling_form == 1 ? Int(scaled_data[i, 5]) : Int(scaled_data[i, 4])
+                x_original = scaling_form == 1 ? scaled_data[i, 6] : scaled_data[i, 5]
                 
                 # Find matching row in original data
                 matching_rows = data[(data.L .== L_val), :]
                 if !isempty(matching_rows)
-                    # Find closest X match (direct comparison, no transformation)
+                    # Match in raw input coordinates, then transform σx to emitted X units.
                     x_col_data = Float64.(matching_rows[:, problem.x_col])
-                    idx = argmin(abs.(x_col_data .- X_scaled))
-                    x_errors[i] = matching_rows[idx, problem.x_err_col]
+                    idx = argmin(abs.(x_col_data .- x_original))
+                    x_errors[i] = L_val^param_means["c1"] * matching_rows[idx, problem.x_err_col]
                 end
             end
             
@@ -797,27 +820,28 @@ function prepare_bootstrap_plot_data(
 
         # Step 6b: Inject σ_X-aware χ² into metadata so plot titles and CSV pipelines
         # read a single, on-disk, "fit-correct" number instead of BSA's y-only raw χ².
-        #   * eta_type == :eta_phi  → m²-R fit: R and Y share C(0), use chi2red_m2R
-        #     so the σ_xy = Y · (1-X) · (σ_Y/Y)² covariance term is folded into σ²_eff.
+        #   * eta_type == :eta_phi  → m²-R fit: R and Y share C(0); `m2R_covariance`
+        #     supplies the σ_xy = Y · (1-X) · (σ_Y/Y)² term folded into σ²_eff.
         #   * otherwise             → just σ_X propagation via chi2_interp (xerr column).
         # The original BSA raw value remains under metadata["chi2"]; chi2_eff is additive.
         # Gate on xerr column presence so we don't overwrite chi2_eff with a value
         # numerically equal to raw chi2 when σ_X propagation has nothing to do.
-        # Form 1 is excluded: chi2_interp/chi2red_m2R evaluate the model against the
-        # leading scaling function only (data_sections[2]); for scaling_form=1 the
-        # L^{-c3} correction term is not part of that section, so the residual keeps
-        # the full correction and χ² blows up. Consumers should fall back to
-        # metadata["chi2"] (BSA's raw χ²) for form-1 fits.
+        # Form-1 additionally requires the named point-prediction section that
+        # new_bfss-rs always emits; old form-1 files without it fall back
+        # to BSA's raw chi2.
+        has_predictions = BSACore.has_point_predictions(metadata)
         if !isempty(data_sections) &&
-           scaling_form == 0 &&
-           size(data_sections[1], 2) == 7 + 1 &&
+           size(data_sections[1], 2) == (scaling_form == 1 ? 9 : 8) &&
+           (scaling_form == 0 || has_predictions) &&
            haskey(metadata, "n_points") && haskey(metadata, "n_freeparams")
             try
-                dof = max(1, metadata["n_points"] - metadata["n_freeparams"])
-                metadata["chi2_eff"] = if eta_type == :eta_phi
-                    chi2red_m2R(metadata, data_sections) * dof
+                if eta_type == :eta_phi
+                    sigma_xy = m2R_covariance(data_sections)
+                    metadata["sigma_xy"] = sigma_xy
+                    metadata["chi2_eff"] = BSACore.chi2_interp(
+                        metadata, data_sections; sigma_xy=sigma_xy)
                 else
-                    BSACore.chi2_interp(metadata, data_sections)
+                    metadata["chi2_eff"] = BSACore.chi2_interp(metadata, data_sections)
                 end
             catch err
                 @warn "Step 6b: chi2_eff injection failed; collapse title will fall back to BSA raw chi2" err
@@ -916,7 +940,13 @@ function chi2red_m2R(metadata::Dict{String,Any},
             "Ensure BSAProblem has x_err_col defined."))
     end
 
-    # ===== Step 3: Extract columns =====
+    sigma_xy = m2R_covariance(data_sections)
+    return BSACore.chi2red_interp(metadata, data_sections; sigma_xy=sigma_xy)
+end
+
+function m2R_covariance(data_sections::Vector{<:AbstractMatrix})
+    scaled_data = data_sections[1]
+
     # For m²-R fitting with c1=0, scaled X equals original x
     # Column layout: [X, Y, E, ...] is the same for both form=0 and form=1
     X = Float64.(scaled_data[:, 1])  # correlation ratio
@@ -925,7 +955,7 @@ function chi2red_m2R(metadata::Dict{String,Any},
 
     n_points = size(scaled_data, 1)
 
-    # ===== Step 4: Compute covariance for each data point =====
+    # σ_xy = Y · (1-x) · (E/Y)² for each data point
     sigma_xy = Vector{Float64}(undef, n_points)
 
     for i in 1:n_points
@@ -934,8 +964,7 @@ function chi2red_m2R(metadata::Dict{String,Any},
         sigma_xy[i] = result.covariance
     end
 
-    # ===== Step 5: Delegate to chi2red_interp =====
-    return BSACore.chi2red_interp(metadata, data_sections; sigma_xy=sigma_xy)
+    return sigma_xy
 end
 
 end

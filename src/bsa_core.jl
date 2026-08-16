@@ -5,7 +5,7 @@ using Printf
 
 export BSAConfig, BSAParameters, run_bsa_analysis, resolve_bsa_binary
 export ensure_parameters, update_parameters, get_param_to_pidx_mapping
-export parse_bsa_output, extract_parameter_dict, extract_physical_params, print_summary
+export parse_bsa_output, get_point_predictions, has_point_predictions, extract_parameter_dict, extract_physical_params, print_summary
 export chi2_interp, chi2red_interp
 
 ## -------------------------------------------------------------------------- ##
@@ -71,6 +71,14 @@ function resolve_bsa_binary(binary::String)
     resolved === nothing && error("BSA binary not found: $(binary). Set BSAConfig(binary=...) or ENV[\"BSA_BIN\"], or ensure it is in PATH.")
     return resolved
 end
+
+# Count of parameters actually sent as free to the binary, derived from the
+# same mask segment that `build_bsa_command` emits (handles the form-0/form-1
+# parameter-count difference and the shared theta mask).
+parameter_mask(cfg::BSAConfig, params::BSAParameters) =
+    build_parameter_segment(cfg, params)[1:2:end] .== "1"
+
+count_free_params(cfg::BSAConfig, params::BSAParameters) = count(parameter_mask(cfg, params))
 
 """
     ensure_parameters(params)
@@ -297,11 +305,44 @@ function parse_bsa_output(filename::String)
     lines = readlines(filename)
     metadata = Dict{String, Any}()
     data_sections = Vector{Matrix{Float64}}()
+    section_index = Dict{Tuple{Int,String},Int}()
+    section_columns = Dict{Tuple{Int,String},Vector{String}}()
+    n_points_by_dataset = Dict{Int,Int}()
     current_section = Vector{Vector{Float64}}()
+    current_dataset = nothing
+    current_section_name = nothing
+    current_columns = String[]
     blank_count = 0
+
+    function finish_section!()
+        isempty(current_section) && return
+        push!(data_sections, hcat(current_section...)')
+        if current_section_name !== nothing
+            dataset_id = something(current_dataset, 0)
+            key = (dataset_id, current_section_name)
+            haskey(section_index, key) && throw(ArgumentError(
+                "Duplicate BSA output section $(current_section_name) for dataset $dataset_id"))
+            section_index[key] = length(data_sections)
+            section_columns[key] = copy(current_columns)
+        end
+        empty!(current_section)
+        current_dataset = nothing
+        current_section_name = nothing
+        empty!(current_columns)
+        return
+    end
+
     for line in lines
         if startswith(line, "# Number of data points")
-            metadata["n_points"] = parse(Int, split(line, '=')[2])
+            count_value = parse(Int, split(line, '=')[2])
+            dataset_match = match(r"dataset\[(\d+)\]", line)
+            if dataset_match === nothing
+                metadata["n_points"] = count_value
+            else
+                dataset_id = parse(Int, dataset_match.captures[1])
+                n_points_by_dataset[dataset_id] = count_value
+                metadata["n_points"] = sum(values(n_points_by_dataset))
+            end
         elseif startswith(line, "# Number of free parameters")
             metadata["n_freeparams"] = parse(Int, split(line, '=')[2])
         elseif startswith(line, "# Scaling form")
@@ -314,6 +355,14 @@ function parse_bsa_output(filename::String)
             value = parse(Float64, parts[1])
             stderr = length(parts) > 1 ? parse(Float64, parts[2]) : NaN
             metadata["p$(idx)"] = (value, stderr)
+        elseif startswith(line, "# Dataset :")
+            finish_section!()
+            current_dataset = parse(Int, strip(split(line, ':'; limit=2)[2]))
+        elseif startswith(line, "# Section :")
+            finish_section!()
+            current_section_name = strip(split(line, ':'; limit=2)[2])
+        elseif startswith(line, "# Columns :")
+            current_columns = split(strip(split(line, ':'; limit=2)[2]))
         end
         if startswith(line, "#")
             continue
@@ -322,8 +371,7 @@ function parse_bsa_output(filename::String)
         if isempty(stripped)
             blank_count += 1
             if blank_count >= 2 && !isempty(current_section)
-                push!(data_sections, hcat(current_section...)')
-                current_section = Vector{Vector{Float64}}()
+                finish_section!()
                 blank_count = 0
             end
         else
@@ -336,21 +384,102 @@ function parse_bsa_output(filename::String)
             end
         end
     end
-    if !isempty(current_section)
-        push!(data_sections, hcat(current_section...)')
-    end
+    finish_section!()
+    metadata["section_index"] = section_index
+    metadata["section_columns"] = section_columns
     return metadata, data_sections
 end
 
 """
+    get_point_predictions(metadata, data_sections)
+
+Return the named `point_predictions` columns as a named tuple of vectors.
+Throws when the output does not contain that section.
+"""
+function get_point_predictions(metadata::Dict{String,Any},
+                               data_sections::Vector{<:AbstractMatrix})
+    section_index = get(metadata, "section_index", nothing)
+    section_columns = get(metadata, "section_columns", nothing)
+    key = (0, "point_predictions")
+    legacy_key = (0, "point_predictions_form1")
+    if !(section_index isa AbstractDict) || !haskey(section_index, key)
+        if section_index isa AbstractDict && haskey(section_index, legacy_key)
+            key = legacy_key
+        else
+            throw(ArgumentError(
+                "point_predictions section is unavailable; use new_bfss-rs >= 2.1 (emits it for both scaling forms)"))
+        end
+    end
+    section_columns isa AbstractDict && haskey(section_columns, key) || throw(ArgumentError(
+        "Column metadata is missing for $(key[2])"))
+
+    section = data_sections[section_index[key]]
+    columns = section_columns[key]
+    size(section, 2) == length(columns) || throw(ArgumentError(
+        "$(key[2]) column count mismatch: expected $(length(columns)), got $(size(section, 2))"))
+    symbols = Tuple(Symbol.(columns))
+    length(unique(symbols)) == length(symbols) || throw(ArgumentError(
+        "$(key[2]) contains duplicate column names"))
+    return NamedTuple{symbols}(Tuple(Vector{Float64}(column) for column in eachcol(section)))
+end
+
+"""
+    has_point_predictions(metadata) -> Bool
+
+Return true when the output carries a `point_predictions` section.
+"""
+function has_point_predictions(metadata::Dict{String,Any})
+    section_index = get(metadata, "section_index", nothing)
+    return section_index isa AbstractDict &&
+        (haskey(section_index, (0, "point_predictions")) ||
+         haskey(section_index, (0, "point_predictions_form1")))
+end
+
+# Model-value and derivative columns of a point-predictions table, abstracting
+# over the per-form column names (`mu_full`/`dmu_full_dX1` for scaling_form=1,
+# `mu`/`dmu_dX1` for scaling_form=0).
+_predictions_mu(predictions::NamedTuple) = hasproperty(predictions, :mu_full) ?
+    predictions.mu_full : predictions.mu
+_predictions_dmu(predictions::NamedTuple) = hasproperty(predictions, :dmu_full_dX1) ?
+    predictions.dmu_full_dX1 : predictions.dmu_dX1
+
+# Normalize sigma_xy to a per-point vector (nothing stays nothing).
+function _normalize_sigma_xy(sigma_xy, n_points)
+    sigma_xy === nothing && return nothing
+    vec = Float64.(sigma_xy)
+    length(vec) == n_points || throw(ArgumentError(
+        "sigma_xy length mismatch: expected $n_points, got $(length(vec))"))
+    all(isfinite, vec) || throw(ArgumentError("sigma_xy contains non-finite values"))
+    return vec
+end
+
+# xerr-aware effective variance σ²_eff = E² + μ′²σ_X² − 2μ′σ_xy, shared by the
+# point-prediction and interpolation χ² paths and by the plotting extension's
+# residual panel.
+function _effective_variance(E, dmu, xerr, sigma_xy_vec)
+    sigma2_eff = E .^ 2 .+ (dmu .^ 2) .* (xerr .^ 2)
+    sigma_xy_vec !== nothing && (sigma2_eff .-= 2 .* dmu .* sigma_xy_vec)
+    all(s2 -> isfinite(s2) && s2 > 0, sigma2_eff) || throw(ArgumentError(
+        "Encountered non-finite or non-positive σ_eff^2"))
+    return sigma2_eff
+end
+
+_chi2_effective_variance(Y, E, mu, dmu, xerr, sigma_xy_vec) =
+    sum((Y .- mu) .^ 2 ./ _effective_variance(E, dmu, xerr, sigma_xy_vec))
+
+"""
     chi2_interp(metadata, data_sections; sigma_xy=nothing) -> Float64
 
-Recompute an approximate χ² by interpolating the scaling function and evaluating
+Recompute χ² from the scaled data and the fitted model:
 
     χ² = Σᵢ ((Yᵢ - F(Xᵢ)) / Eᵢ)²
 
-This is a *naive* goodness-of-fit measure, meant to be consistent with the
-residuals plot logic (linear interpolation with linear extrapolation).
+When the output carries a `point_predictions` section, the native per-point
+model values and analytic derivatives from that section are used. Otherwise
+(form=0 output without that section) the scaling-function grid is linearly
+interpolated and differentiated numerically, which is an approximation meant
+to be consistent with the residuals plot logic (linear interpolation with
+linear extrapolation).
 
 # Inputs
 - `data_sections[1]`: scaled data table (at least 3 columns: X, Y, E).
@@ -360,25 +489,72 @@ residuals plot logic (linear interpolation with linear extrapolation).
 - `data_sections[2]`: scaling function table (at least 2 columns: X_func, mu_func; sigma is ignored)
 
 # Keywords
-- `sigma_xy`: optional covariance between X and Y for each point (same coordinates as scaled_data),
-  used only when `xerr` is present.
-  When provided, the effective variance becomes:
+- `sigma_xy`: optional per-point covariance between X and Y (same coordinates as scaled_data),
+  used only when `xerr` is present. When provided, the effective variance becomes:
   `σ_eff^2 = σ_y^2 + (df/dx)^2 σ_x^2 - 2 (df/dx) σ_xy`.
-  - If `sigma_xy` is a Real, the covariance is assumed to be constant for all points.
 """
 function chi2_interp(metadata::Dict{String,Any},
                      data_sections::Vector{<:AbstractMatrix};
-                     sigma_xy::Union{AbstractVector,Real,Nothing}=nothing)
+                     sigma_xy::Union{AbstractVector,Nothing}=nothing)
     length(data_sections) >= 2 || throw(ArgumentError("data_sections must contain at least 2 sections: scaled_data and scaling_func"))
 
-    get(metadata, "form", 0) == 1 && throw(ArgumentError(
-        "chi2_interp is invalid for scaling_form=1: it evaluates the model against the " *
-        "leading scaling function (data_sections[2]) only, ignoring the L^{-c3} " *
-        "correction term, which grossly inflates χ². Use metadata[\"chi2\"] " *
-        "(BSA's raw χ²) for form-1 fits."))
+    form = get(metadata, "form", 0)
+    form == 0 || form == 1 || throw(ArgumentError("Unsupported scaling form: $form"))
+    # Point predictions are mandatory for form=1; for form=0 they are used
+    # whenever the binary emitted them, otherwise we fall back to the
+    # scaling-function grid.
+    if form == 1 || has_point_predictions(metadata)
+        return _chi2_from_point_predictions(metadata, data_sections; sigma_xy=sigma_xy)
+    end
+    return _chi2_from_grid_interpolation(data_sections[1], data_sections[2]; sigma_xy=sigma_xy)
+end
 
+# Strategy 1: native per-point model values (mu) and analytic derivatives
+# (dmu) from the point_predictions section — no interpolation involved.
+function _chi2_from_point_predictions(metadata::Dict{String,Any},
+                                      data_sections::Vector{<:AbstractMatrix};
+                                      sigma_xy=nothing)
     scaled_data = data_sections[1]
-    scaling_func = data_sections[2]
+    predictions = get_point_predictions(metadata, data_sections)
+    n_points = length(predictions.Y)
+    size(scaled_data, 1) == n_points || throw(ArgumentError(
+        "point_predictions row count does not match scaled data"))
+
+    Y = predictions.Y
+    E = predictions.E
+    mu = _predictions_mu(predictions)
+    derivative = _predictions_dmu(predictions)
+    all(isfinite, Y) && all(isfinite, mu) || throw(ArgumentError(
+        "point_predictions contains non-finite observations or predictions"))
+    all(e -> isfinite(e) && e > 0, E) || throw(ArgumentError(
+        "point_predictions contains non-finite or non-positive E values"))
+
+    # scaled_data layout: form=0 has 7 columns (8 with xerr),
+    # form=1 has 8 columns (9 with xerr); xerr is always the last column
+    form = get(metadata, "form", 0)
+    base_cols = form == 1 ? 8 : 7
+    n_cols = size(scaled_data, 2)
+    if n_cols == base_cols
+        sigma_xy === nothing || throw(ArgumentError(
+            "sigma_xy is provided but xerr column is not present in scaled_data"))
+        return sum(((Y .- mu) ./ E) .^ 2)
+    end
+    n_cols == base_cols + 1 || throw(ArgumentError(
+        "scaled_data must have $base_cols columns for form=$form, or $(base_cols + 1) with xerr"))
+    xerr = Float64.(scaled_data[:, end])
+    all(x -> isfinite(x) && x >= 0, xerr) || throw(ArgumentError(
+        "scaled_data contains non-finite or negative xerr values"))
+    return _chi2_effective_variance(Y, E, mu, derivative, xerr,
+                                    _normalize_sigma_xy(sigma_xy, n_points))
+end
+
+# Legacy fallback for form-0 output without a point_predictions section
+# (pre-2.1 binaries): interpolate the scaling-function grid and differentiate
+# numerically. Self-built tables with at least 3 columns (X, Y, E) are accepted.
+# Delete this function and the router's else branch when old-format files are retired.
+function _chi2_from_grid_interpolation(scaled_data::AbstractMatrix,
+                                       scaling_func::AbstractMatrix;
+                                       sigma_xy=nothing)
     size(scaled_data, 2) >= 3 || throw(ArgumentError("scaled_data must have at least 3 columns: X, Y, E"))
     size(scaling_func, 2) >= 2 || throw(ArgumentError("scaling_func must have at least 2 columns: X_func, mu_func"))
 
@@ -416,11 +592,9 @@ function chi2_interp(metadata::Dict{String,Any},
     itp = LinearInterpolation(X_unique, mu_unique, extrapolation_bc=Line())
     mu_at_data = itp.(X) # regression function value at the data points
 
-    # Select the xerr column
-    form = get(metadata, "form", 0)
-    base_cols = form == 1 ? 8 : 7
+    # Select the xerr column (only the standard 8-column layout carries one)
     xerr = nothing
-    if size(scaled_data, 2) == base_cols + 1
+    if size(scaled_data, 2) == 8
         xerr = Float64.(scaled_data[:, end])
         all(x -> isfinite(x) && x >= 0, xerr) || throw(ArgumentError("scaled_data contains non-finite or negative xerr values"))
     end
@@ -428,19 +602,7 @@ function chi2_interp(metadata::Dict{String,Any},
     xerr === nothing && sigma_xy !== nothing && throw(ArgumentError("sigma_xy is provided but xerr column is not present in scaled_data"))
 
     # case 1: no xerr column
-    if xerr === nothing
-        return sum(((Y .- mu_at_data) ./ E) .^ 2)
-    end
-
-    # Prepare the covariance vector
-    sigma_xy_vec = if sigma_xy !== nothing
-        vec = sigma_xy isa Real ? fill(Float64(sigma_xy), length(X)) : Float64.(sigma_xy)
-        length(vec) == length(X) || throw(ArgumentError("sigma_xy length mismatch: expected $(length(X)), got $(length(vec))"))
-        all(isfinite, vec) || throw(ArgumentError("sigma_xy contains non-finite values"))
-        vec
-    else
-        nothing
-    end
+    xerr === nothing && return sum(((Y .- mu_at_data) ./ E) .^ 2)
 
     # slopes[i] is the slope of the interval [X_unique[i], X_unique[i+1]]
     slopes = (mu_unique[2:end] .- mu_unique[1:end-1]) ./ (X_unique[2:end] .- X_unique[1:end-1])
@@ -457,13 +619,9 @@ function chi2_interp(metadata::Dict{String,Any},
     end
 
     dfdx = map(dfdx_at, X)
-    # case 2: xerr column is present
-    sigma2_eff = E .^ 2 .+ (dfdx .^ 2) .* (xerr .^ 2)
-    # case 3: sigma_xy column is present
-    sigma_xy_vec !== nothing && (sigma2_eff .-= 2 .* dfdx .* sigma_xy_vec)
-    all(s2 -> isfinite(s2) && s2 > 0, sigma2_eff) || throw(ArgumentError("Encountered non-finite or non-positive σ_eff^2 while computing χ²"))
-
-    return sum((Y .- mu_at_data) .^ 2 ./ sigma2_eff)
+    # case 2: xerr column is present (sigma_xy folded in when provided)
+    return _chi2_effective_variance(Y, E, mu_at_data, dfdx, xerr,
+                                    _normalize_sigma_xy(sigma_xy, length(X)))
 end
 
 """
@@ -474,13 +632,15 @@ Compute the reduced χ² using `chi2_interp`:
     χ²_red = χ² / (n_points - n_freeparams)
 
 If `metadata["n_points"]` is missing, falls back to `size(data_sections[1], 1)`.
-If `metadata["n_freeparams"]` is missing, defaults to 0.
+The degrees of freedom prefer `metadata["fit_n_freeparams"]` (injected by
+`prepare_bootstrap_plot_data` for parameter-fixed reconstruction runs, whose own
+`n_freeparams` is 0); otherwise `metadata["n_freeparams"]`, defaulting to 0.
 """
 function chi2red_interp(metadata::Dict{String,Any},
                         data_sections::Vector{<:AbstractMatrix};
-                        sigma_xy::Union{AbstractVector,Real,Nothing}=nothing)
+                        sigma_xy::Union{AbstractVector,Nothing}=nothing)
     n_points = get(metadata, "n_points", size(data_sections[1], 1))
-    n_freeparams = get(metadata, "n_freeparams", 0)
+    n_freeparams = get(metadata, "fit_n_freeparams", get(metadata, "n_freeparams", 0))
     dof = n_points - n_freeparams
     dof > 0 || throw(ArgumentError("Invalid degrees of freedom: n_points=$n_points, n_freeparams=$n_freeparams"))
     return chi2_interp(metadata, data_sections; sigma_xy=sigma_xy) / dof
