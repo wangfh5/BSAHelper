@@ -110,7 +110,7 @@ else
     )
 
     # Binder ratio is dimensionless: fix c2 = 0, and fit only βc and ν (c1 = 1/ν)
-    base_params = BSAParameters(
+    start_centers = BSAParameters(
         Tc_init = 0.47,
         Tc_fixed = false,
         c1_init = 1.0,
@@ -134,7 +134,7 @@ else
         verbose = true
     )
 
-    bootstrap_result = bootstrap_bsa_analysis(problem, boot_cfg, bsa_cfg, base_params)
+    bootstrap_result = bootstrap_bsa_analysis(problem, boot_cfg, bsa_cfg, start_centers)
     bootstrap_result === nothing && error("Bootstrap failed: bootstrap_bsa_analysis returned nothing")
 
     summary_path = joinpath(RESULTS_DIR, "bootstrap_summary.txt")
@@ -144,7 +144,8 @@ else
         bootstrap_result,
         summary_path;
         critical_param_name = CRITICAL_PARAM_NAME,
-        eta_type = ETA_TYPE
+        eta_type = ETA_TYPE,
+        start_centers = start_centers
     )
 
     # Reconstruct the scaling function at bootstrap-mean parameters (for plotting and residuals)

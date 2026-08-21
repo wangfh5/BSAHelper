@@ -402,9 +402,13 @@ end
 ## -------------------------------------------------------------------------- ##
 
 """
-    bootstrap_bsa_analysis(problem, cfg, bsa_cfg, base_params)
+    bootstrap_bsa_analysis(problem, cfg, bsa_cfg, start_centers)
 
 Run bootstrap resampling for the supplied problem definition and return statistics.
+
+`start_centers` (`BSAParameters` or NamedTuple): per-trial start values are
+sampled as center + uniform jitter of radius `BootstrapConfig.jitter_params`;
+`*_fixed` flags pass through to every trial fit.
 
 Returns BootstrapResult containing raw BSA parameters. Use `extract_physical_params()`
 to convert to physical quantities (Uc/Tc, ν, η).
@@ -412,7 +416,7 @@ to convert to physical quantities (Uc/Tc, ν, η).
 function bootstrap_bsa_analysis(problem::BSAProblem,
                                 cfg::BootstrapConfig,
                                 bsa_cfg::BSACore.BSAConfig,
-                                base_params)
+                                start_centers)
     # Check the relative error for each bootstrap sample
     rel_err = Float64(cfg.y_sample_relative_error)
     if !isfinite(rel_err) || rel_err < 0
@@ -425,7 +429,7 @@ function bootstrap_bsa_analysis(problem::BSAProblem,
         return nothing
     end
 
-    base_params_struct = BSACore.ensure_parameters(base_params)
+    start_centers_struct = BSACore.ensure_parameters(start_centers)
 
     if cfg.seed !== nothing
         Random.seed!(cfg.seed)
@@ -464,7 +468,7 @@ function bootstrap_bsa_analysis(problem::BSAProblem,
             # Each thread gets its own random samples (thread-safe)
             x_sample = x_vals .+ x_err .* randn(length(x_vals))
             y_sample = y_vals .+ y_err .* randn(length(y_vals))
-            params = randomise_parameters(base_params_struct, cfg)
+            params = randomise_parameters(start_centers_struct, cfg)
 
             # Use thread ID to avoid file conflicts
             tid = threadid()
@@ -539,14 +543,41 @@ end
 ## -------------------------------------------------------------------------- ##
 
 """
-    save_bootstrap_summary(problem, config, result, output_file; 
-                          critical_param_name="Uc", eta_type=:none)
+    format_start_centers(params)
+
+One-line summary of the `*_init` fields in field order, with ` (fixed)`
+appended where the corresponding `*_fixed` flag is set.
+"""
+function format_start_centers(params::BSACore.BSAParameters)
+    fields = fieldnames(BSACore.BSAParameters)
+    parts = String[]
+    for f in fields
+        fname = String(f)
+        endswith(fname, "_init") || continue
+        stem = fname[1:end-5]  # drop "_init"
+        fixed_fld = Symbol(stem, "_fixed")
+        if !(fixed_fld in fields)  # theta0..theta4 share the single theta_fixed
+            fixed_fld = Symbol(rstrip(stem, ['0':'9'...,]), "_fixed")
+        end
+        entry = @sprintf("%s=%.6g", fname, getfield(params, f))
+        if fixed_fld in fields && getfield(params, fixed_fld)
+            entry *= " (fixed)"
+        end
+        push!(parts, entry)
+    end
+    return "Fit start centers: " * join(parts, ", ")
+end
+
+"""
+    save_bootstrap_summary(problem, config, result, output_file;
+                          critical_param_name="Uc", eta_type=:none, start_centers=nothing)
 
 Persist bootstrap statistics to a comprehensive human-readable summary.
 
-Integrates context from `BSAProblem`, `BootstrapConfig`, and `BootstrapResult` 
+Integrates context from `BSAProblem`, `BootstrapConfig`, and `BootstrapResult`
 to provide a self-contained summary including:
 - Analysis metadata (problem name, L range, bootstrap config)
+- Fit start centers (when `start_centers` is given)
 - Raw parameters (Tc, c1, c2, ...)
 - Physical quantities (Uc/Tc/Jc, ν, η) with user-defined interpretation
 - Success rate and distribution statistics
@@ -558,11 +589,15 @@ to provide a self-contained summary including:
 - `output_file`: Path to save the summary
 - `critical_param_name`: Physical name for critical point (default: "Uc")
 - `eta_type`: Interpretation of c2 (:none, :eta_psi, :eta_phi)
+- `start_centers`: `BSAParameters` (or NamedTuple) of per-trial starting-point
+  centers (see `bootstrap_bsa_analysis`). When given, a `Fit start centers:`
+  line is printed after the success rate.
 """
 function save_bootstrap_summary(problem::BSAProblem, config::BootstrapConfig,
                                 result::BootstrapResult, output_file::String;
                                 critical_param_name::String="Uc",
-                                eta_type::Symbol=:none)
+                                eta_type::Symbol=:none,
+                                start_centers=nothing)
     # Generate formatted physical quantities (contains value, error, value_str, error_str)
     phys_fmt = extract_and_format_physical_params(result;
                                                   critical_param_name=critical_param_name,
@@ -582,6 +617,9 @@ function save_bootstrap_summary(problem::BSAProblem, config::BootstrapConfig,
         println(io, "L range: $Lmin - $Lmax")
         println(io, "Bootstrap samples: $(config.n_samples)")
         println(io, "Success rate: $(round(success_rate(result) * 100, digits=1))% ($(result.n_success)/$(result.n_trials))")
+        if start_centers !== nothing
+            println(io, format_start_centers(BSACore.ensure_parameters(start_centers)))
+        end
         if !isempty(config.jitter_params)
             println(io, "Jitter parameters: $(config.jitter_params)")
         end

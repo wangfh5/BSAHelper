@@ -256,4 +256,41 @@ using Test
         @test formatted["eta_phi"].value_str == "0.67"
         @test formatted["eta_phi"].error_str == "0.01"
     end
+
+    @testset "save_bootstrap_summary reports fit start centers" begin
+        using DataFrames
+        problem = BSAProblem(name="test_obs", L_values=[4, 6],
+            data=DataFrame(L=[4, 6], x=[0.1, 0.2], y=[1.0, 2.0], yerr=[0.01, 0.02]),
+            x_col=:x, y_col=:y, y_err_col=:yerr)
+        result = BSAHelper.BSABootstrap.BootstrapResult(
+            Dict("Tc" => 3.85, "c1" => 0.9, "c2" => 0.1),
+            Dict("Tc" => 0.02, "c1" => 0.05, "c2" => 0.01),
+            90, 100, [Dict("Tc" => 3.85, "c1" => 0.9, "c2" => 0.1)])
+
+        path, _ = mktemp()
+        try
+            # start_centers omitted (default nothing): no Fit start centers line
+            save_bootstrap_summary(problem, BootstrapConfig(n_samples=100), result, path)
+            lines = split(read(path, String), "\n")
+            @test findfirst(l -> startswith(l, "Fit start centers"), lines) === nothing
+            @test any(l -> startswith(l, "Success rate"), lines)
+
+            # start_centers given: one line after Success rate, all centers listed
+            centers = (Tc_init=5.4237, c1_fixed=true, theta_fixed=true, c3_init=0.333)
+            save_bootstrap_summary(problem, BootstrapConfig(n_samples=100), result, path;
+                                   start_centers=centers)
+            lines = split(read(path, String), "\n")
+            idx_success = findfirst(l -> startswith(l, "Success rate"), lines)
+            idx_centers = findfirst(l -> startswith(l, "Fit start centers"), lines)
+            @test idx_centers == idx_success + 1
+            @test occursin("Tc_init=5.4237", lines[idx_centers])
+            @test occursin("c1_init=0.9 (fixed)", lines[idx_centers])   # c1_init defaults, c1_fixed=true
+            @test occursin("c2_init=0.1", lines[idx_centers])           # not fixed
+            @test occursin("c3_init=0.333", lines[idx_centers])
+            @test occursin("theta0_init=1 (fixed)", lines[idx_centers]) # shared theta_fixed
+            @test !occursin("Tc_init=5.4237 (fixed)", lines[idx_centers])
+        finally
+            isfile(path) && rm(path; force=true)
+        end
+    end
 end
