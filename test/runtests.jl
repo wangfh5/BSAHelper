@@ -253,8 +253,9 @@ using Test
         formatted = BSAHelper.BSABootstrap.format_physical_params(
             Dict("eta_phi" => (0.6691286447059479, 0.009151253245169017)), 1000)
         @test formatted["eta_phi"].digits == 1
-        @test formatted["eta_phi"].value_str == "0.67"
-        @test formatted["eta_phi"].error_str == "0.01"
+        # Rounding 0.00915 up carries to 0.01; the decimal place of the unrounded error is kept
+        @test formatted["eta_phi"].value_str == "0.669"
+        @test formatted["eta_phi"].error_str == "0.010"
     end
 
     @testset "save_bootstrap_summary reports fit start centers" begin

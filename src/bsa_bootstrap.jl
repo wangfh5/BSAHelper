@@ -236,9 +236,10 @@ function format_physical_params(phys_num::Dict{String,Tuple{Float64,Float64}},
                       "quoting it as $rounded_err. Increase the number of successful " *
                       "bootstrap samples for a precise error bar."
             end
-            # sigdigits=0 时 round_error 已把误差上进到量级（如 0.0069 → 0.01），
-            # format_value_error 原生支持按量级引用并保持值与误差精度对齐
-            val_str, err_str = format_value_error(val, rounded_err, sigdigits; format=fmt)
+            # Pass the unrounded error: format_value_error rounds it up itself and keeps
+            # the decimal place when rounding carries into the next decade (0.0098 → 0.010).
+            # sigdigits=0 quotes the error by its order of magnitude (0.0069 → 0.01).
+            val_str, err_str = format_value_error(val, err, sigdigits; format=fmt)
         else
             err_of_err = 0.0
             sigdigits = -1
